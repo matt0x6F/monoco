@@ -1,6 +1,7 @@
-// Package release orchestrates an interactive (or --bump-driven)
-// release across a Go workspace: detect affected modules from `replace`
-// directives, prompt for per-module bumps, and hand off to propagate.
+// Package release orchestrates a release across a Go workspace:
+// detect affected modules from `replace` directives, apply per-module
+// bump kinds (default: patch; override via Options.Bumps), and hand
+// off to propagate for rewrite/tag/push.
 package release
 
 import (
@@ -18,28 +19,20 @@ import (
 
 // Options configures a release run.
 type Options struct {
-	// Bumps is the pre-supplied per-module bump kind, keyed by module path.
-	// Any direct-affected module without an entry will be prompted for
-	// (if a Prompter is supplied) or cause a fail-closed error.
+	// Bumps is the per-module bump kind override, keyed by module path.
+	// Any module not in this map defaults to bump.Patch.
+	// A bump.Skip entry drops that module from the plan.
 	Bumps map[string]bump.Kind
-	// PromptCascade, when true, also prompts for cascaded modules.
-	PromptCascade bool
 	// Slug overrides the train-tag slug; empty = use current branch.
 	Slug string
 	// Remote is the push target. "" skips push.
 	Remote string
 }
 
-// Prompter asks the user for a bump kind for one module.
-type Prompter interface {
-	Ask(modPath, curVersion string, direct bool) (bump.Kind, error)
-}
-
-// Plan gathers affected modules, resolves all bumps (via prompter for
-// any missing direct-affected entries), builds the propagation plan,
-// and writes it to stdout. Returns the plan for optional application.
-// A nil plan with nil error means "nothing to release."
-func Plan(ws *workspace.Workspace, opts Options, prompter Prompter, stdout io.Writer) (*propagate.Plan, error) {
+// Plan gathers affected modules, applies bump kinds (default patch,
+// override via opts.Bumps), builds the propagation plan, and writes it
+// to stdout. A nil plan with nil error means "nothing to release."
+func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.Plan, error) {
 	directs, err := propagate.DirectFromReplaces(ws)
 	if err != nil {
 		return nil, fmt.Errorf("detect affected modules: %w", err)
@@ -53,43 +46,10 @@ func Plan(ws *workspace.Workspace, opts Options, prompter Prompter, stdout io.Wr
 	for k, v := range opts.Bumps {
 		bumps[k] = v
 	}
-
-	cascaded := propagate.CascadeExpansion(ws, directs)
-	all := append([]string{}, directs...)
-	all = append(all, cascaded...)
-	sort.Strings(all)
-
-	curVers, err := currentVersions(ws, all)
-	if err != nil {
-		return nil, err
-	}
-
-	directSet := map[string]bool{}
+	// Direct-affected modules default to Patch unless overridden.
 	for _, d := range directs {
-		directSet[d] = true
-	}
-
-	var toPrompt []string
-	for _, m := range all {
-		if _, set := bumps[m]; set {
-			continue
-		}
-		if directSet[m] || opts.PromptCascade {
-			toPrompt = append(toPrompt, m)
-		}
-	}
-	sort.Strings(toPrompt)
-
-	if len(toPrompt) > 0 {
-		if prompter == nil {
-			return nil, fmt.Errorf("no bump specified for module(s): %v (supply --bump <module>=<kind>)", toPrompt)
-		}
-		for _, m := range toPrompt {
-			k, err := prompter.Ask(m, curVers[m], directSet[m])
-			if err != nil {
-				return nil, fmt.Errorf("prompt %s: %w", m, err)
-			}
-			bumps[m] = k
+		if _, set := bumps[d]; !set {
+			bumps[d] = bump.Patch
 		}
 	}
 
@@ -114,7 +74,10 @@ func Apply(ws *workspace.Workspace, plan *propagate.Plan, opts Options) (*propag
 	return propagate.Apply(ws, plan, propagate.ApplyOptions{Remote: opts.Remote})
 }
 
-func currentVersions(ws *workspace.Workspace, modules []string) (map[string]string, error) {
+// CurrentVersions reports the latest tagged version per module path.
+// Exposed mainly so CLIs can show pre-release context.
+func CurrentVersions(ws *workspace.Workspace, modules []string) (map[string]string, error) {
+	sort.Strings(modules)
 	out := map[string]string{}
 	for _, mp := range modules {
 		m := ws.Modules[mp]

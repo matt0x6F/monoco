@@ -24,12 +24,11 @@ func (b *bumpFlag) Set(v string) error { b.entries = append(b.entries, v); retur
 func cmdRelease(root string, args []string) {
 	fs := flag.NewFlagSet("release", flag.ExitOnError)
 	var bumps bumpFlag
-	fs.Var(&bumps, "bump", "<module>=<major|minor|patch|skip> (repeatable) — non-interactive bumps")
-	promptCascade := fs.Bool("prompt-cascade", false, "prompt for cascaded modules too (default: auto-patch)")
+	fs.Var(&bumps, "bump", "<module>=<major|minor|patch|skip> (repeatable) — override the default patch bump")
 	remote := fs.String("remote", "origin", "remote to push to; set to \"\" to skip push")
 	slug := fs.String("slug", "", "train-tag slug (default: current branch)")
 	dryRun := fs.Bool("dry-run", false, "print plan and exit")
-	assumeYes := fs.Bool("y", false, "skip interactive Proceed? confirmation")
+	assumeYes := fs.Bool("y", false, "skip the Proceed? confirmation")
 	fs.Parse(args)
 
 	ws, err := workspace.Load(root)
@@ -41,19 +40,13 @@ func cmdRelease(root string, args []string) {
 		fatal(err)
 	}
 
-	var prompter release.Prompter
-	if isInteractive() {
-		prompter = release.NewStdioPrompter(os.Stdin, os.Stdout)
-	}
-
 	opts := release.Options{
-		Bumps:         bumpMap,
-		PromptCascade: *promptCascade,
-		Slug:          *slug,
-		Remote:        *remote,
+		Bumps:  bumpMap,
+		Slug:   *slug,
+		Remote: *remote,
 	}
 
-	plan, err := release.Plan(ws, opts, prompter, os.Stdout)
+	plan, err := release.Plan(ws, opts, os.Stdout)
 	if err != nil {
 		fatal(err)
 	}
@@ -109,12 +102,4 @@ func parseBumpFlags(ws *workspace.Workspace, entries []string) (map[string]bump.
 		out[mp] = k
 	}
 	return out, nil
-}
-
-func isInteractive() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
 }

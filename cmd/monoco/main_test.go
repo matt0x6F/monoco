@@ -119,7 +119,7 @@ func TestCLI_release_withBumpAndReplace(t *testing.T) {
 	}
 }
 
-func TestCLI_release_failsClosedWithoutBump(t *testing.T) {
+func TestCLI_release_defaultsDirectToPatchWithoutBump(t *testing.T) {
 	bin := buildCLI(t)
 
 	fx := fixture.New(t, fixture.Spec{
@@ -139,17 +139,10 @@ func TestCLI_release_failsClosedWithoutBump(t *testing.T) {
 	runT(t, fx.Root, "git", "add", "-A")
 	runT(t, fx.Root, "git", "commit", "-m", "wip: add replace")
 
-	// Non-interactive (stdin is a pipe) with no --bump → must error.
-	cmd := exec.Command(bin, "release", "--dry-run")
-	cmd.Dir = fx.Root
-	cmd.Stdin = strings.NewReader("")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err == nil {
-		t.Fatal("expected failure when no --bump and no TTY")
-	}
-	if !strings.Contains(stderr.String(), "no bump specified") && !strings.Contains(stderr.String(), "supply --bump") {
-		t.Errorf("error should mention missing bump; stderr:\n%s", stderr.String())
+	// No --bump, dry-run: should default storage to patch (v0.1.1), not error.
+	out := runCLI(t, bin, fx.Root, "release", "--dry-run", "--slug", "default-patch")
+	if !strings.Contains(out, "v0.1.1") || !strings.Contains(out, "example.com/mono/storage") {
+		t.Errorf("plan missing default-patch bump for storage:\n%s", out)
 	}
 }
 

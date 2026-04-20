@@ -4,7 +4,7 @@ Go-native monorepo tooling: atomic, propagated releases across module boundaries
 
 **The problem it solves.** In a Go monorepo with modules `A → B → C` (A depends on B, B depends on C), shipping a change to C the native way takes three releases: tag C, bump B's `go.mod`, tag B, bump A's `go.mod`, tag A. Cross-module refactors are chicken-and-egg (A won't compile against new B until B is tagged; B won't compile against new C until C is tagged).
 
-**monoco's mental model.** Releasing isn't a noun, it's a verb: *propagate a change through the dependency graph atomically*. While working, you `replace` your in-flight modules locally so the whole workspace compiles. When you're ready, `monoco release` asks which bumps you want, rewrites every downstream `go.mod` + `go.sum`, strips the local `replace` directives, verifies the whole thing compiles in module mode, tags every affected module, and pushes everything atomically. All tags point at a single release commit. External consumers see honest per-module semver.
+**monoco's mental model.** Releasing isn't a noun, it's a verb: *propagate a change through the dependency graph atomically*. While working, you `replace` your in-flight modules locally so the whole workspace compiles. When you're ready, `monoco release` reads those `replace` directives as your declaration of "these are shipping," rewrites every downstream `go.mod` + `go.sum`, strips the local `replace` directives, verifies the whole thing compiles in module mode, tags every affected module, and pushes everything atomically. All tags point at a single release commit. External consumers see honest per-module semver.
 
 ## Install
 
@@ -26,22 +26,23 @@ monoco init
 #   // modules/api/go.mod
 #   replace example.com/mono/storage => ../storage
 
-# When you're ready to ship, run:
-monoco release
-# Interactive: prompts you for the bump kind of each module that has a
-# workspace-local `replace` pointing at it (= under active development).
-# Cascaded consumers auto-patch.
+# When you're ready to ship, preview:
+monoco release --dry-run
 
-# Non-interactive (agents, CI):
-monoco release --bump modules/storage=minor --bump modules/api=patch
+# Cut the release (everything defaults to a patch bump):
+monoco release -y
+
+# Override the default where a module deserves minor or major:
+monoco release -y --bump modules/storage=minor
+
+# Drop a module from this release:
+monoco release -y --bump modules/storage=skip
 ```
 
 Also useful:
 ```bash
-monoco release --dry-run --bump modules/storage=minor   # preview only
-monoco release --prompt-cascade                         # ask about cascades too
-monoco affected --since origin/main                     # transitive-affected set
-monoco test --since origin/main                         # run tests only where it matters
+monoco affected --since origin/main     # transitive-affected set
+monoco test --since origin/main         # run tests only where it matters
 monoco lint --since origin/main
 monoco build --since origin/main
 monoco generate --since origin/main
@@ -53,9 +54,9 @@ monoco generate --since origin/main
 - Per-module tags follow Go's nested-module convention: `modules/storage/v0.9.0`.
 - Each release gets a train tag pointing at the same release commit: `train/2026-04-18-<slug>`.
 - Release commit message: `release: train/<date>-<slug>`.
-- **Bump intent is declared at release time** — either interactively or via `--bump <module>=<kind>`. No commit-message inference, no Conventional Commits dependency. The engineer who just finished the work says what the bumps should be.
+- **Bump kinds default to `patch`** for every module in the plan. Override per-module with `--bump <module>=<minor|major|skip>`. No commit-message inference, no prompting, no Conventional Commits dependency.
 - A **direct-affected** module is one whose source is under active local development, identified by the presence of a workspace-local `replace` directive pointing at it from any sibling module's `go.mod`.
-- A **cascaded** module is a consumer of a direct-affected module; it gets an auto-patch bump unless `--prompt-cascade` is set.
+- A **cascaded** module is a consumer of a direct-affected module. It gets the same default-patch treatment as directs; override with `--bump` if needed.
 - v2+ major-version boundary crossings are refused (they require `/vN` path rewrites across `module` + `require` + imports; planned for a future release).
 
 ## How it works
@@ -64,10 +65,10 @@ Every `release` is one atomic operation:
 
 1. Scan each workspace module's `go.mod` for workspace-local `replace` directives. The replaced modules are the **direct-affected** set.
 2. Transitively expand to consumers via the reverse-dep graph (the **cascade**).
-3. Prompt for direct-affected bumps (or take them from `--bump`). Cascades auto-patch.
-4. For each module in the plan, rewrite downstream `go.mod`s to pin the new tag version, drop workspace-local `replace` directives, and populate `go.sum` with the canonical `h1:` hashes (computed in-process — no network, no proxy).
+3. Apply bump kinds: every module defaults to `patch`, with `--bump <module>=<kind>` overriding where needed (or `=skip` to drop a module). Print the plan.
+4. On confirmation (or `-y`), rewrite every downstream `go.mod` to pin the new tag version, drop workspace-local `replace` directives, and populate `go.sum` with canonical `h1:` hashes (computed in-process — no network, no proxy).
 5. Create one release commit containing all the rewrites.
-6. Verify in module mode (`-modfile=<alt>` with `replace` directives for workspace siblings) — this catches rewrites that break downstream source, which workspace mode hides.
+6. Verify in module mode (`-modfile=<alt>` with `replace` directives for workspace siblings) — catches rewrites that break downstream source, which workspace mode hides.
 7. Tag every module in the plan + a train tag, all pointing at the release commit.
 8. `git push --atomic origin <branch> <tags...>` — all or nothing.
 

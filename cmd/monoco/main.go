@@ -29,11 +29,11 @@ Task commands (fan out over affected set):
   generate --since <ref>   Run ` + "`go generate ./...`" + ` in each affected module.
 
 Release:
-  release                  Declare bumps and cut a release.
+  release                  Cut a release.
                            Affected modules = those with workspace-local
                            ` + "`replace`" + ` directives + transitive consumers.
-                           Interactive by default; supply --bump <module>=<kind>
-                           for non-interactive use.
+                           Every module defaults to a patch bump; override
+                           with --bump <module>=<kind>.
 
 Run "monoco <command> -h" for command-specific flags.
 `

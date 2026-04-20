@@ -12,20 +12,6 @@ import (
 	"github.com/matt0x6f/monoco/internal/workspace"
 )
 
-// fakePrompter records calls and returns scripted kinds.
-type fakePrompter struct {
-	answers map[string]bump.Kind
-	calls   []string
-}
-
-func (p *fakePrompter) Ask(mp, cur string, direct bool) (bump.Kind, error) {
-	p.calls = append(p.calls, mp)
-	if k, ok := p.answers[mp]; ok {
-		return k, nil
-	}
-	return bump.Patch, nil
-}
-
 func setupWithReplace(t *testing.T) *workspace.Workspace {
 	t.Helper()
 	fx := fixture.New(t, fixture.Spec{
@@ -37,7 +23,6 @@ func setupWithReplace(t *testing.T) *workspace.Workspace {
 	gitRun(t, fx.Root, "tag", "modules/storage/v0.1.0")
 	gitRun(t, fx.Root, "tag", "modules/api/v0.1.0")
 
-	// Add workspace-local replace so storage becomes directly affected.
 	apiMod := filepath.Join(fx.Root, "modules/api/go.mod")
 	b := fileRead(t, apiMod)
 	fileWrite(t, apiMod, b+"\nreplace example.com/mono/storage => ../storage\n")
@@ -51,70 +36,49 @@ func setupWithReplace(t *testing.T) *workspace.Workspace {
 	return ws
 }
 
-func TestPlan_promptsOnlyForDirectByDefault(t *testing.T) {
+func TestPlan_defaultsDirectAffectedToPatch(t *testing.T) {
 	ws := setupWithReplace(t)
 
-	fp := &fakePrompter{answers: map[string]bump.Kind{"example.com/mono/storage": bump.Minor}}
 	var out bytes.Buffer
-	plan, err := Plan(ws, Options{Slug: "test"}, fp, &out)
+	plan, err := Plan(ws, Options{Slug: "test"}, &out)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
 	if plan == nil {
 		t.Fatal("expected plan")
 	}
-	// Only storage (direct) should have been prompted; api (cascade) skipped.
-	if len(fp.calls) != 1 || fp.calls[0] != "example.com/mono/storage" {
-		t.Errorf("expected prompt only for storage; got calls=%v", fp.calls)
+	// storage is direct-affected; with no --bump, should default to patch.
+	var storage, api *struct{ NewVersion string }
+	_ = storage
+	_ = api
+	for _, e := range plan.Entries {
+		switch e.ModulePath {
+		case "example.com/mono/storage":
+			if e.NewVersion != "v0.1.1" {
+				t.Errorf("storage defaulted: got %s, want v0.1.1 (patch)", e.NewVersion)
+			}
+			if e.Kind != bump.Patch {
+				t.Errorf("storage kind = %v, want Patch", e.Kind)
+			}
+		case "example.com/mono/api":
+			if e.NewVersion != "v0.1.1" {
+				t.Errorf("api cascade: got %s, want v0.1.1 (patch)", e.NewVersion)
+			}
+		}
 	}
 }
 
-func TestPlan_promptCascadeAsksForAll(t *testing.T) {
+func TestPlan_bumpsOverrideDefault(t *testing.T) {
 	ws := setupWithReplace(t)
 
-	fp := &fakePrompter{answers: map[string]bump.Kind{
-		"example.com/mono/storage": bump.Minor,
-		"example.com/mono/api":     bump.Patch,
-	}}
-	var out bytes.Buffer
-	_, err := Plan(ws, Options{Slug: "test", PromptCascade: true}, fp, &out)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if len(fp.calls) != 2 {
-		t.Errorf("expected 2 prompts with PromptCascade; got %v", fp.calls)
-	}
-}
-
-func TestPlan_failsClosedWithNoPrompter(t *testing.T) {
-	ws := setupWithReplace(t)
-
-	var out bytes.Buffer
-	_, err := Plan(ws, Options{Slug: "test"}, nil, &out)
-	if err == nil {
-		t.Fatal("expected error when missing bump + no prompter")
-	}
-	if !strings.Contains(err.Error(), "supply --bump") {
-		t.Errorf("error should hint at --bump; got %v", err)
-	}
-}
-
-func TestPlan_prefersProvidedBumpsOverPrompts(t *testing.T) {
-	ws := setupWithReplace(t)
-
-	fp := &fakePrompter{}
 	var out bytes.Buffer
 	plan, err := Plan(ws, Options{
 		Slug:  "test",
 		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Minor},
-	}, fp, &out)
+	}, &out)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	if len(fp.calls) != 0 {
-		t.Errorf("expected no prompts when bumps pre-supplied; got %v", fp.calls)
-	}
-	// storage bumped minor → v0.2.0.
 	for _, e := range plan.Entries {
 		if e.ModulePath == "example.com/mono/storage" && e.NewVersion != "v0.2.0" {
 			t.Errorf("storage NewVersion = %s, want v0.2.0", e.NewVersion)
@@ -122,21 +86,42 @@ func TestPlan_prefersProvidedBumpsOverPrompts(t *testing.T) {
 	}
 }
 
-func TestStdioPrompter_parsesInput(t *testing.T) {
+func TestPlan_skipDropsModule(t *testing.T) {
+	ws := setupWithReplace(t)
+
 	var out bytes.Buffer
-	p := &StdioPrompter{
-		In:  bufio.NewReader(strings.NewReader("garbage\nminor\n")),
-		Out: &out,
-	}
-	k, err := p.Ask("foo", "v1.0.0", true)
+	plan, err := Plan(ws, Options{
+		Slug:  "test",
+		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Skip},
+	}, &out)
 	if err != nil {
-		t.Fatalf("Ask: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
-	if k != bump.Minor {
-		t.Errorf("got %v, want Minor", k)
+	if plan != nil {
+		for _, e := range plan.Entries {
+			if e.ModulePath == "example.com/mono/storage" {
+				t.Errorf("storage should be dropped when Skip; got %+v", e)
+			}
+		}
 	}
-	if !strings.Contains(out.String(), "invalid") {
-		t.Errorf("expected 'invalid' reprompt in output; got %q", out.String())
+}
+
+func TestPlan_noAffectedReturnsNil(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	ws, _ := workspace.Load(fx.Root)
+
+	var out bytes.Buffer
+	plan, err := Plan(ws, Options{Slug: "test"}, &out)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan != nil {
+		t.Errorf("expected nil plan when no replaces; got %+v", plan)
+	}
+	if !strings.Contains(out.String(), "nothing to release") {
+		t.Errorf("expected 'nothing to release' message; got: %s", out.String())
 	}
 }
 

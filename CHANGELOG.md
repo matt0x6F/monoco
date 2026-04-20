@@ -10,15 +10,12 @@
 
 ### Added
 
-- **`monoco release`** — interactive (or `--bump`-driven) release command.
+- **`monoco release`** — single release command.
   - Detects directly-affected modules from workspace-local `replace` directives.
   - Expands to cascaded consumers via the reverse-dep graph.
-  - Prompts once per direct-affected module for a bump kind; cascades auto-patch.
-  - `--bump <module>=<kind>` (repeatable) supplies bumps non-interactively.
-  - `--prompt-cascade` surfaces cascaded modules for explicit prompts.
-  - `--dry-run` prints the plan and exits.
-  - `-y` skips the interactive Proceed? confirmation.
-  - Fails closed: any direct-affected module without a bump (and no TTY prompt) is an error, not a silent `None`.
+  - Every module defaults to a `patch` bump. Override with `--bump <module>=<kind>` (repeatable). `=skip` drops a module from the plan.
+  - No prompting: the command reads inputs, prints the plan, asks `Proceed?`, applies. `-y` skips the confirmation.
+  - `--dry-run` prints the plan and exits without applying.
 - **`go.sum` population at release time.** Each downstream's `go.sum` now gets canonical `h1:` hashes for every freshly-tagged dep, computed in-process via `golang.org/x/mod/zip` + `golang.org/x/mod/sumdb/dirhash` — no network, no proxy, no tag-then-download race. (Validated by [POC-4](pocs/04-release-gosum/FINDINGS.md).)
 - **Workspace-local `replace` directives are stripped** from downstream `go.mod`s as part of the release rewrite. Consumers checking out the released tag now build cleanly.
 - **Clean-working-tree preflight** before any release — no uncommitted or untracked changes. Prevents surprise-committing in-flight edits.
