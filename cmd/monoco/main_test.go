@@ -72,6 +72,42 @@ func TestCLI_endToEnd(t *testing.T) {
 	}
 }
 
+// TestCLI_propagatePlanModulesFlag verifies that --modules scopes the plan to
+// exactly the listed modules, ignoring the diff.
+func TestCLI_propagatePlanModulesFlag(t *testing.T) {
+	bin := buildCLI(t)
+
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+		},
+	})
+	runT(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
+	runT(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
+
+	// Edit storage — a diff-based plan would cascade api; --modules api should not.
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
+		"package storage\n\nfunc StorageHello() string { return \"new\" }\n")
+	runT(t, fx.Root, "git", "add", "-A")
+	runT(t, fx.Root, "git", "commit", "-m", "feat(storage): tweak")
+
+	out := runCLI(t, bin, fx.Root, "propagate", "plan", "--modules", "modules/api")
+	if !strings.Contains(out, "example.com/mono/api") {
+		t.Errorf("plan missing api: %s", out)
+	}
+	if strings.Contains(out, "example.com/mono/storage") {
+		t.Errorf("plan should not include storage when --modules=api: %s", out)
+	}
+
+	// Mutual exclusion: --since + --modules must error.
+	cmd := exec.Command(bin, "propagate", "plan", "--since", "HEAD~1", "--modules", "modules/api")
+	cmd.Dir = fx.Root
+	if err := cmd.Run(); err == nil {
+		t.Error("expected error combining --since with --modules")
+	}
+}
+
 func buildCLI(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

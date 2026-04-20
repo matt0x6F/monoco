@@ -62,19 +62,87 @@ func NewPlan(ws *workspace.Workspace, oldRef, newRef string, opts Options) (*Pla
 	for _, m := range direct {
 		directSet[m] = struct{}{}
 	}
-
 	all := affected.Compute(ws, direct)
-	if len(all) == 0 {
+	return buildPlan(ws, all, directSet, oldRef, newRef, opts)
+}
+
+// NewPlanForModules computes a plan from an explicit module list: no diff,
+// no transitive expansion. Each listed module is treated as directly changed.
+// modulePaths must be module paths (e.g. "example.com/mono/api") already
+// resolved against the workspace; use ResolveModuleRef to accept RelDir inputs.
+func NewPlanForModules(ws *workspace.Workspace, modulePaths []string, opts Options) (*Plan, error) {
+	if len(modulePaths) == 0 {
+		return nil, fmt.Errorf("no modules specified")
+	}
+	seen := map[string]struct{}{}
+	directSet := map[string]struct{}{}
+	ordered := make([]string, 0, len(modulePaths))
+	for _, mp := range modulePaths {
+		if _, ok := ws.Modules[mp]; !ok {
+			known := make([]string, 0, len(ws.Modules))
+			for p := range ws.Modules {
+				known = append(known, p)
+			}
+			sort.Strings(known)
+			return nil, fmt.Errorf("module %q not found in workspace (known: %s)", mp, strings.Join(known, ", "))
+		}
+		if _, dup := seen[mp]; dup {
+			continue
+		}
+		seen[mp] = struct{}{}
+		directSet[mp] = struct{}{}
+		ordered = append(ordered, mp)
+	}
+	return buildPlan(ws, ordered, directSet, "", "HEAD", opts)
+}
+
+// ResolveModuleRef accepts either a module path (as in go.mod) or a RelDir
+// (as in go.work `use`) and returns the canonical module path. The boolean
+// indicates whether the input resolved to a known workspace module.
+func ResolveModuleRef(ws *workspace.Workspace, input string) (string, bool) {
+	if _, ok := ws.Modules[input]; ok {
+		return input, true
+	}
+	want := normalizeRelDir(input)
+	for path, mod := range ws.Modules {
+		if normalizeRelDir(mod.RelDir) == want {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+// buildPlan constructs entries for the given module set. If oldRef == "",
+// per-module commit classification uses each module's latest tag as the
+// lower bound; otherwise the shared (oldRef, newRef] range applies.
+func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]struct{}, oldRef, newRef string, opts Options) (*Plan, error) {
+	if len(modules) == 0 {
 		return &Plan{Root: ws.Root, OldRef: oldRef, NewRef: newRef, TrainTag: ""}, nil
 	}
 
 	// Classify bumps per module.
 	bumps := map[string]convco.Kind{}
-	for _, modPath := range all {
+	oldVersions := map[string]string{}
+	for _, modPath := range modules {
 		mod := ws.Modules[modPath]
+		rel := normalizeRelDir(mod.RelDir)
+		old, err := gitgraph.LatestTagForModule(ws.Root, rel)
+		if err != nil {
+			return nil, fmt.Errorf("latest tag for %s: %w", modPath, err)
+		}
+		oldVersions[modPath] = old
+
 		var kinds []convco.Kind
 		if _, isDirect := directSet[modPath]; isDirect {
-			commits, err := gitgraph.CommitsInRange(ws.Root, oldRef, newRef, normalizeRelDir(mod.RelDir))
+			from := oldRef
+			if from == "" {
+				// No global base: use this module's latest tag as the lower
+				// bound. If never tagged, leave empty so log walks full history.
+				if old != "" {
+					from = rel + "/" + old
+				}
+			}
+			commits, err := gitgraph.CommitsInRange(ws.Root, from, newRef, rel)
 			if err != nil {
 				return nil, fmt.Errorf("commits for %s: %w", modPath, err)
 			}
@@ -102,14 +170,8 @@ func NewPlan(ws *workspace.Workspace, oldRef, newRef string, opts Options) (*Pla
 
 	// Compute new versions. Reject major v1→v2 crossings for v1 of monoco.
 	versions := map[string]string{}
-	oldVersions := map[string]string{}
 	for modPath, kind := range bumps {
-		mod := ws.Modules[modPath]
-		old, err := gitgraph.LatestTagForModule(ws.Root, normalizeRelDir(mod.RelDir))
-		if err != nil {
-			return nil, fmt.Errorf("latest tag for %s: %w", modPath, err)
-		}
-		oldVersions[modPath] = old
+		old := oldVersions[modPath]
 		newV, err := convco.NextVersion(old, kind)
 		if err != nil {
 			return nil, fmt.Errorf("next version for %s: %w", modPath, err)
@@ -121,8 +183,8 @@ func NewPlan(ws *workspace.Workspace, oldRef, newRef string, opts Options) (*Pla
 	}
 
 	// Topological order over workspace reverse-dep edges restricted to
-	// the affected set. Kahn-style for determinism.
-	ordered := topoOrder(ws, all)
+	// the module set. Kahn-style for determinism.
+	ordered := topoOrder(ws, modules)
 
 	entries := make([]Entry, 0, len(ordered))
 	for _, modPath := range ordered {
