@@ -61,6 +61,15 @@ type harness struct {
 	modPath  string // module-path prefix (e.g. github.com/matt0x6F/monoco-test-monorepo)
 	base     string // merge-base of HEAD with origin/main, set after branch
 	cloneURL string // URL actually used for clone+push (token-baked if HTTPS+TOKEN)
+
+	// baselineTags is a snapshot of refs/tags/* on origin at harness
+	// creation, mapping ref → SHA. Used by assertRemoteMissingTag to
+	// distinguish "this run pushed the tag" (fail) from "a prior run
+	// legitimately left this tag behind" (ignore). Module tags like
+	// modules/storage/v0.2.0 are global and accumulate across runs
+	// until the nightly sweep GCs them, so bare presence/absence is
+	// not a sufficient signal.
+	baselineTags map[string]string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -95,17 +104,39 @@ func newHarness(t *testing.T) *harness {
 	base := trim(mustCapture(t, wt, "git", "merge-base", "HEAD", "origin/main"))
 
 	h := &harness{
-		t:        t,
-		bin:      bin,
-		wt:       wt,
-		runID:    runID,
-		branch:   branch,
-		modPath:  modPath,
-		base:     base,
-		cloneURL: cloneURL,
+		t:            t,
+		bin:          bin,
+		wt:           wt,
+		runID:        runID,
+		branch:       branch,
+		modPath:      modPath,
+		base:         base,
+		cloneURL:     cloneURL,
+		baselineTags: snapshotRemoteTags(t, wt),
 	}
-	t.Logf("harness ready: runID=%s branch=%s base=%s", runID, branch, base[:min(12, len(base))])
+	t.Logf("harness ready: runID=%s branch=%s base=%s baselineTags=%d",
+		runID, branch, base[:min(12, len(base))], len(h.baselineTags))
 	return h
+}
+
+// snapshotRemoteTags returns a map of refs/tags/* → SHA on origin at
+// the moment of the call. Used to detect which tags a test run pushed
+// vs. which already existed (since module tags are globally namespaced
+// and prior runs' tags linger until the nightly sweep GCs them).
+func snapshotRemoteTags(t *testing.T, wt string) map[string]string {
+	t.Helper()
+	out := mustCapture(t, wt, "git", "ls-remote", "--refs", "origin", "refs/tags/*")
+	m := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) == 2 {
+			m[parts[1]] = parts[0]
+		}
+	}
+	return m
 }
 
 // chooseCloneURL returns (url, human-readable note). Prefers HTTPS+token;
@@ -279,13 +310,33 @@ func (h *harness) assertReleaseCommitTouches(module, file string) {
 	h.t.Errorf("release commit does not touch %s\nfiles changed:\n%s", rel, out)
 }
 
-// assertRemoteMissingTag fails the test if the given tag ref IS present.
+// assertRemoteMissingTag fails the test if `ref` was created or moved
+// during this run. A tag that existed at the same SHA when the harness
+// started is treated as pre-existing (from a prior run) and ignored —
+// module tags are a shared namespace and we can only attribute a push
+// to this run when the SHA differs from baseline.
 func (h *harness) assertRemoteMissingTag(ref string) {
 	h.t.Helper()
 	out := mustCapture(h.t, h.wt, "git", "ls-remote", "--refs", "origin", ref)
-	if strings.Contains(out, ref) {
-		h.t.Errorf("remote unexpectedly has %s\nls-remote output:\n%s", ref, out)
+	var sha string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[1] == ref {
+			sha = parts[0]
+			break
+		}
 	}
+	if sha == "" {
+		return
+	}
+	if baseline := h.baselineTags[ref]; sha == baseline {
+		return
+	}
+	h.t.Errorf("remote unexpectedly has %s at %s (baseline: %q) — this run pushed or moved the tag\nls-remote output:\n%s",
+		ref, sha, h.baselineTags[ref], out)
 }
 
 // consumerProbe builds a throwaway consumer module in a temp dir and
