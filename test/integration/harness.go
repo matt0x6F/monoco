@@ -355,6 +355,22 @@ func (h *harness) consumerProbe(apiVersion string) {
 	consumerDir := h.t.TempDir()
 	consumerHome := h.t.TempDir() // sandboxed HOME for .netrc
 
+	// Go populates $GOMODCACHE (default $HOME/go/pkg/mod) with files
+	// mode 0444 so module contents are immutable. t.TempDir's cleanup
+	// RemoveAll doesn't chmod before unlinking, so teardown would fail
+	// with "permission denied." Register a LIFO-earlier cleanup that
+	// walks the dir and restores write perms. (t.Cleanup fires before
+	// the RemoveAll registered by TempDir at creation.)
+	h.t.Cleanup(func() {
+		_ = filepath.Walk(consumerHome, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			_ = os.Chmod(p, 0o700)
+			return nil
+		})
+	})
+
 	consumerGoMod := "module monoco-integration-consumer\n\ngo 1.22\n"
 	consumerMain := "package main\n\nimport (\n\t\"fmt\"\n\n\t\"" +
 		h.modPath + "/modules/api\"\n)\n\nfunc main() {\n\tfmt.Println(api.Fetch(\"probe\"))\n}\n"
