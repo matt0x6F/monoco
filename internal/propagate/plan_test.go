@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/matt0x6f/monoco/internal/fixture"
@@ -119,6 +120,114 @@ func TestNewPlan_rejectsMajorBumpV1ToV2(t *testing.T) {
 	_, err := NewPlan(ws, base, "HEAD", Options{Slug: "test"})
 	if err == nil {
 		t.Fatal("expected NewPlan to reject v1→v2 major bump in v1 of monoco")
+	}
+}
+
+func TestNewPlanForModules_explicitListSkipsDiff(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+		},
+	})
+	run(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
+	run(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
+
+	// Edit storage (should be ignored by --modules mode).
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"), "package storage\n\nfunc StorageHello() string { return \"new\" }\n")
+	run(t, fx.Root, "git", "add", "-A")
+	run(t, fx.Root, "git", "commit", "-m", "feat(storage): tweak")
+
+	ws, err := workspace.Load(fx.Root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	plan, err := NewPlanForModules(ws, []string{"example.com/mono/api"}, Options{Slug: "test"})
+	if err != nil {
+		t.Fatalf("NewPlanForModules: %v", err)
+	}
+	paths := plan.ModulePaths()
+	if len(paths) != 1 || paths[0] != "example.com/mono/api" {
+		t.Fatalf("expected plan with only api, got %v", paths)
+	}
+	api := findEntry(plan, "example.com/mono/api")
+	if api == nil {
+		t.Fatal("api entry missing")
+	}
+	if !api.DirectChange {
+		t.Error("api should be DirectChange=true (explicitly listed)")
+	}
+	if api.OldVersion != "v0.1.0" || api.NewVersion != "v0.1.1" {
+		t.Errorf("api version wrong: old=%s new=%s", api.OldVersion, api.NewVersion)
+	}
+}
+
+func TestNewPlanForModules_unknownModuleError(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	ws, err := workspace.Load(fx.Root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, err = NewPlanForModules(ws, []string{"example.com/does/not/exist"}, Options{Slug: "test"})
+	if err == nil {
+		t.Fatal("expected error for unknown module")
+	}
+	if !strings.Contains(err.Error(), "example.com/does/not/exist") {
+		t.Errorf("error should name the bad module, got: %v", err)
+	}
+}
+
+func TestNewPlanForModules_topoOrder(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+			{Name: "gateway", DependsOn: []string{"api"}},
+		},
+	})
+	for _, m := range []string{"storage", "api", "gateway"} {
+		run(t, fx.Root, "git", "tag", "modules/"+m+"/v0.1.0")
+	}
+	ws, _ := workspace.Load(fx.Root)
+	plan, err := NewPlanForModules(ws, []string{
+		"example.com/mono/gateway",
+		"example.com/mono/storage",
+		"example.com/mono/api",
+	}, Options{Slug: "test"})
+	if err != nil {
+		t.Fatalf("NewPlanForModules: %v", err)
+	}
+	order := plan.ModulePaths()
+	idx := map[string]int{}
+	for i, p := range order {
+		idx[p] = i
+	}
+	if idx["example.com/mono/storage"] >= idx["example.com/mono/api"] {
+		t.Errorf("expected storage before api: %v", order)
+	}
+	if idx["example.com/mono/api"] >= idx["example.com/mono/gateway"] {
+		t.Errorf("expected api before gateway: %v", order)
+	}
+}
+
+func TestResolveModuleRef_acceptsRelDirAndModulePath(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	ws, _ := workspace.Load(fx.Root)
+	if p, ok := ResolveModuleRef(ws, "example.com/mono/storage"); !ok || p != "example.com/mono/storage" {
+		t.Errorf("module path: got (%s, %v)", p, ok)
+	}
+	if p, ok := ResolveModuleRef(ws, "modules/storage"); !ok || p != "example.com/mono/storage" {
+		t.Errorf("RelDir: got (%s, %v)", p, ok)
+	}
+	if p, ok := ResolveModuleRef(ws, "./modules/storage"); !ok || p != "example.com/mono/storage" {
+		t.Errorf("dirty RelDir: got (%s, %v)", p, ok)
+	}
+	if _, ok := ResolveModuleRef(ws, "nope"); ok {
+		t.Error("expected not-found for bogus ref")
 	}
 }
 
