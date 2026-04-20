@@ -175,27 +175,44 @@ func (h *harness) writeBreakingAPI() {
 	mustRun(h.t, h.wt, "git", "commit", "-m", "feat(api): reference missing storage symbol (run "+h.runID+")")
 }
 
-// plan runs `monoco propagate plan --since <base> --slug <runID>` and
-// returns stdout. It fails the test on non-zero exit.
+// addLocalReplace appends a workspace-local `replace` from api/go.mod to
+// the named target module and commits it. Required because `monoco
+// release` derives the direct-affected set from replace directives.
+func (h *harness) addLocalReplace(target string) {
+	h.t.Helper()
+	apiMod := filepath.Join(h.wt, "modules/api/go.mod")
+	b, err := os.ReadFile(apiMod)
+	if err != nil {
+		h.t.Fatalf("read %s: %v", apiMod, err)
+	}
+	line := fmt.Sprintf("\nreplace %s/modules/%s => ../%s\n", h.modPath, target, target)
+	if err := os.WriteFile(apiMod, append(b, []byte(line)...), 0o644); err != nil {
+		h.t.Fatalf("write %s: %v", apiMod, err)
+	}
+	mustRun(h.t, h.wt, "git", "add", "-A")
+	mustRun(h.t, h.wt, "git", "commit", "-m", "local: replace "+target+" for run "+h.runID)
+}
+
+// plan runs `monoco release --dry-run --slug <runID>` and returns stdout.
+// It fails the test on non-zero exit.
 func (h *harness) plan(extra ...string) string {
 	h.t.Helper()
-	args := append([]string{"propagate", "plan", "--since", h.base, "--slug", h.runID}, extra...)
+	args := append([]string{"release", "--dry-run", "--slug", h.runID}, extra...)
 	return mustCapture(h.t, h.wt, h.bin, args...)
 }
 
-// apply runs propagate apply. Same contract as plan.
+// apply runs `monoco release -y --remote origin --slug <runID>`.
 func (h *harness) apply(extra ...string) string {
 	h.t.Helper()
-	args := append([]string{"propagate", "apply", "--since", h.base, "--slug", h.runID, "--remote", "origin"}, extra...)
+	args := append([]string{"release", "-y", "--slug", h.runID, "--remote", "origin"}, extra...)
 	return mustCapture(h.t, h.wt, h.bin, args...)
 }
 
-// applyExpectFail runs propagate apply and returns (stdout, stderr,
-// nil) if the command FAILED, or fails the test if it succeeded. Used
-// by the verify-rollback test.
+// applyExpectFail runs release and returns (stdout, stderr) if the
+// command FAILED, or fails the test if it succeeded.
 func (h *harness) applyExpectFail(extra ...string) (string, string) {
 	h.t.Helper()
-	args := append([]string{"propagate", "apply", "--since", h.base, "--slug", h.runID, "--remote", "origin"}, extra...)
+	args := append([]string{"release", "-y", "--slug", h.runID, "--remote", "origin"}, extra...)
 	cmd := exec.Command(h.bin, args...)
 	cmd.Dir = h.wt
 	cmd.Env = sanitizedEnv()

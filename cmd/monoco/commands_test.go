@@ -4,55 +4,59 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matt0x6f/monoco/internal/propagate"
+	"github.com/matt0x6f/monoco/internal/bump"
 	"github.com/matt0x6f/monoco/internal/workspace"
 )
 
-func TestSplitModulesList(t *testing.T) {
-	cases := []struct {
-		in      string
-		want    []string
-		wantErr bool
-	}{
-		{"a", []string{"a"}, false},
-		{"a,b,c", []string{"a", "b", "c"}, false},
-		{" a , b ", []string{"a", "b"}, false},
-		{"a,,b", nil, true},
-		{",a", nil, true},
-		{"", nil, true},
-	}
-	for _, tc := range cases {
-		got, err := splitModulesList(tc.in)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("splitModulesList(%q) err=%v wantErr=%v", tc.in, err, tc.wantErr)
-			continue
-		}
-		if err != nil {
-			continue
-		}
-		if len(got) != len(tc.want) {
-			t.Errorf("splitModulesList(%q) = %v, want %v", tc.in, got, tc.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != tc.want[i] {
-				t.Errorf("splitModulesList(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
-			}
-		}
-	}
+func newWS() *workspace.Workspace {
+	w := &workspace.Workspace{Modules: map[string]workspace.Module{}}
+	w.Modules["example.com/foo"] = workspace.Module{Path: "example.com/foo", Dir: "/tmp/foo", RelDir: "foo"}
+	w.Modules["example.com/bar"] = workspace.Module{Path: "example.com/bar", Dir: "/tmp/bar", RelDir: "bar"}
+	return w
 }
 
-func TestBuildPropagatePlan_mutuallyExclusiveFlags(t *testing.T) {
-	// Workspace isn't touched on the rejection path; a zero workspace is fine.
-	ws := &workspace.Workspace{Modules: map[string]workspace.Module{}}
+func TestParseBumpFlags(t *testing.T) {
+	ws := newWS()
 
-	_, err := buildPropagatePlan(ws, "HEAD~1", "modules/api", propagate.Options{})
-	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("expected mutually-exclusive error, got: %v", err)
+	cases := []struct {
+		name    string
+		in      []string
+		want    map[string]bump.Kind
+		wantErr string
+	}{
+		{"by module path", []string{"example.com/foo=minor"},
+			map[string]bump.Kind{"example.com/foo": bump.Minor}, ""},
+		{"by reldir", []string{"bar=patch"},
+			map[string]bump.Kind{"example.com/bar": bump.Patch}, ""},
+		{"skip", []string{"example.com/foo=skip"},
+			map[string]bump.Kind{"example.com/foo": bump.Skip}, ""},
+		{"multiple", []string{"example.com/foo=major", "bar=patch"},
+			map[string]bump.Kind{"example.com/foo": bump.Major, "example.com/bar": bump.Patch}, ""},
+		{"missing kind", []string{"example.com/foo="}, nil, "want <module>=<kind>"},
+		{"missing module", []string{"=minor"}, nil, "want <module>=<kind>"},
+		{"unknown module", []string{"example.com/baz=minor"}, nil, "not found"},
+		{"unknown kind", []string{"example.com/foo=feat"}, nil, "invalid bump kind"},
 	}
-
-	_, err = buildPropagatePlan(ws, "", "", propagate.Options{})
-	if err == nil || !strings.Contains(err.Error(), "must specify") {
-		t.Errorf("expected 'must specify' error, got: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseBumpFlags(ws, tc.in)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("got[%s] = %v, want %v", k, got[k], v)
+				}
+			}
+		})
 	}
 }

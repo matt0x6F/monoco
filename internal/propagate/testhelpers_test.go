@@ -24,6 +24,15 @@ func rewriteRequire(t *testing.T, goModPath, depPath, newVersion string) {
 	}
 }
 
+func osReadFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	return string(b), err
+}
+
+func osWriteFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
 func gitStatus(t *testing.T, root string) string {
 	t.Helper()
 	cmd := exec.Command("git", "-C", root, "status", "--porcelain")

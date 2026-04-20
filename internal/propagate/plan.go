@@ -11,8 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matt0x6f/monoco/internal/affected"
-	"github.com/matt0x6f/monoco/internal/convco"
+	"github.com/matt0x6f/monoco/internal/bump"
 	"github.com/matt0x6f/monoco/internal/gitgraph"
 	"github.com/matt0x6f/monoco/internal/workspace"
 	"golang.org/x/mod/semver"
@@ -20,63 +19,49 @@ import (
 
 // Options controls plan construction.
 type Options struct {
-	// Slug is the human-readable train-tag suffix (e.g., branch name).
-	// If empty, NewPlan derives one from the current branch via git.
+	// Slug is the human-readable train-tag suffix (e.g. branch name).
+	// If empty, NewPlanForModules derives one from the current branch.
 	Slug string
 	// Today overrides the date used in the train tag; zero means "now".
 	Today time.Time
-	// BumpOverrides lets the caller force a specific bump per module path.
-	BumpOverrides map[string]convco.Kind
+	// Bumps is the per-module bump kind for directly-affected modules.
+	// Keyed by module path. Cascaded modules are auto-patched and do
+	// NOT need an entry. A Skip entry drops that module from the plan.
+	// A direct-affected module without an entry is a fail-closed error.
+	Bumps map[string]bump.Kind
 }
 
 // Entry is one module's slice of a plan.
 type Entry struct {
-	ModulePath   string      // module path (from go.mod)
-	RelDir       string      // repo-relative dir (used for tag prefix)
-	OldVersion   string      // "" if never tagged
-	NewVersion   string      // always set
-	Kind         convco.Kind // bump kind
-	TagName      string      // <RelDir>/<NewVersion>
-	DirectChange bool        // true if touched by a commit in range; false if cascaded
+	ModulePath   string    // module path (from go.mod)
+	RelDir       string    // repo-relative dir (used for tag prefix)
+	OldVersion   string    // "" if never tagged
+	NewVersion   string    // always set
+	Kind         bump.Kind // bump kind applied
+	TagName      string    // <RelDir>/<NewVersion>
+	DirectChange bool      // true if affected by a replace; false if cascaded
 }
 
 // Plan is a deterministic propagation plan.
 type Plan struct {
 	Root      string
-	OldRef    string // base commit range start
-	NewRef    string // base commit range end
 	Entries   []Entry
 	TrainTag  string // train/<YYYY-MM-DD>-<slug>
 	CommitMsg string // "release: <TrainTag>"
 }
 
-// NewPlan computes the plan for the range (oldRef, newRef].
-func NewPlan(ws *workspace.Workspace, oldRef, newRef string, opts Options) (*Plan, error) {
-	// Identify touched modules from the diff.
-	files, err := gitgraph.TouchedFiles(ws.Root, oldRef, newRef)
-	if err != nil {
-		return nil, fmt.Errorf("diff range: %w", err)
-	}
-	direct := affected.FromTouchedFiles(ws, files)
-	directSet := map[string]struct{}{}
-	for _, m := range direct {
-		directSet[m] = struct{}{}
-	}
-	all := affected.Compute(ws, direct)
-	return buildPlan(ws, all, directSet, oldRef, newRef, opts)
-}
-
-// NewPlanForModules computes a plan from an explicit module list: no diff,
-// no transitive expansion. Each listed module is treated as directly changed.
-// modulePaths must be module paths (e.g. "example.com/mono/api") already
-// resolved against the workspace; use ResolveModuleRef to accept RelDir inputs.
+// NewPlanForModules computes a plan from an explicit directly-affected
+// module list. Each listed module is treated as a direct change; the
+// transitive consumer closure is computed from the workspace graph and
+// the consumers ride the cascade as implicit patches.
+//
+// modulePaths must be module paths already resolved against the
+// workspace; use ResolveModuleRef to accept RelDir inputs.
 func NewPlanForModules(ws *workspace.Workspace, modulePaths []string, opts Options) (*Plan, error) {
 	if len(modulePaths) == 0 {
 		return nil, fmt.Errorf("no modules specified")
 	}
-	seen := map[string]struct{}{}
 	directSet := map[string]struct{}{}
-	ordered := make([]string, 0, len(modulePaths))
 	for _, mp := range modulePaths {
 		if _, ok := ws.Modules[mp]; !ok {
 			known := make([]string, 0, len(ws.Modules))
@@ -86,19 +71,15 @@ func NewPlanForModules(ws *workspace.Workspace, modulePaths []string, opts Optio
 			sort.Strings(known)
 			return nil, fmt.Errorf("module %q not found in workspace (known: %s)", mp, strings.Join(known, ", "))
 		}
-		if _, dup := seen[mp]; dup {
-			continue
-		}
-		seen[mp] = struct{}{}
 		directSet[mp] = struct{}{}
-		ordered = append(ordered, mp)
 	}
-	return buildPlan(ws, ordered, directSet, "", "HEAD", opts)
+	// Transitive closure under reverse-dep edges.
+	ordered := transitiveClosure(ws, modulePaths)
+	return buildPlan(ws, ordered, directSet, opts)
 }
 
-// ResolveModuleRef accepts either a module path (as in go.mod) or a RelDir
-// (as in go.work `use`) and returns the canonical module path. The boolean
-// indicates whether the input resolved to a known workspace module.
+// ResolveModuleRef accepts either a module path (as in go.mod) or a
+// RelDir (as in go.work `use`) and returns the canonical module path.
 func ResolveModuleRef(ws *workspace.Workspace, input string) (string, bool) {
 	if _, ok := ws.Modules[input]; ok {
 		return input, true
@@ -112,17 +93,37 @@ func ResolveModuleRef(ws *workspace.Workspace, input string) (string, bool) {
 	return "", false
 }
 
-// buildPlan constructs entries for the given module set. If oldRef == "",
-// per-module commit classification uses each module's latest tag as the
-// lower bound; otherwise the shared (oldRef, newRef] range applies.
-func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]struct{}, oldRef, newRef string, opts Options) (*Plan, error) {
+// CascadeExpansion returns the transitive consumer closure of directs,
+// minus directs themselves. Exposed so the release orchestrator can show
+// which modules will be auto-patched (and optionally prompt for them).
+// Returned in deterministic topo order.
+func CascadeExpansion(ws *workspace.Workspace, directs []string) []string {
+	all := transitiveClosure(ws, directs)
+	directSet := map[string]struct{}{}
+	for _, d := range directs {
+		directSet[d] = struct{}{}
+	}
+	out := make([]string, 0, len(all))
+	for _, m := range all {
+		if _, d := directSet[m]; !d {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// buildPlan constructs entries for the given module set, using
+// opts.Bumps for direct-affected kinds and auto-patch for cascades.
+func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]struct{}, opts Options) (*Plan, error) {
 	if len(modules) == 0 {
-		return &Plan{Root: ws.Root, OldRef: oldRef, NewRef: newRef, TrainTag: ""}, nil
+		return &Plan{Root: ws.Root, TrainTag: ""}, nil
 	}
 
-	// Classify bumps per module.
-	bumps := map[string]convco.Kind{}
+	// Classify bumps per module. Fail closed on missing direct entries.
+	bumps := map[string]bump.Kind{}
 	oldVersions := map[string]string{}
+	skipped := map[string]struct{}{}
+	var missing []string
 	for _, modPath := range modules {
 		mod := ws.Modules[modPath]
 		rel := normalizeRelDir(mod.RelDir)
@@ -132,47 +133,41 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		}
 		oldVersions[modPath] = old
 
-		var kinds []convco.Kind
-		if _, isDirect := directSet[modPath]; isDirect {
-			from := oldRef
-			if from == "" {
-				// No global base: use this module's latest tag as the lower
-				// bound. If never tagged, leave empty so log walks full history.
-				if old != "" {
-					from = rel + "/" + old
-				}
+		_, isDirect := directSet[modPath]
+		if isDirect {
+			k, ok := opts.Bumps[modPath]
+			if !ok {
+				missing = append(missing, modPath)
+				continue
 			}
-			commits, err := gitgraph.CommitsInRange(ws.Root, from, newRef, rel)
-			if err != nil {
-				return nil, fmt.Errorf("commits for %s: %w", modPath, err)
+			if k == bump.Skip {
+				skipped[modPath] = struct{}{}
+				continue
 			}
-			for _, c := range commits {
-				kinds = append(kinds, convco.Classify(c.Subject, c.Body))
+			bumps[modPath] = k
+			continue
+		}
+		// Cascaded: auto-patch unless caller overrode with Skip.
+		if k, ok := opts.Bumps[modPath]; ok {
+			if k == bump.Skip {
+				skipped[modPath] = struct{}{}
+				continue
 			}
+			bumps[modPath] = k
+			continue
 		}
-		b := convco.Aggregate(kinds)
-		if override, ok := opts.BumpOverrides[modPath]; ok {
-			b = override
-		}
-		// Non-directly-touched modules that were pulled in transitively get
-		// at least a patch bump (they must be re-released because their
-		// go.mod will change).
-		if _, isDirect := directSet[modPath]; !isDirect && b == convco.None {
-			b = convco.Patch
-		}
-		// Directly touched modules with only chore/docs commits still ride
-		// the cascade IF one of their deps was bumped — enforce patch.
-		if b == convco.None {
-			b = convco.Patch
-		}
-		bumps[modPath] = b
+		bumps[modPath] = bump.Patch
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return nil, fmt.Errorf("no bump specified for direct-affected module(s): %s", strings.Join(missing, ", "))
 	}
 
-	// Compute new versions. Reject major v1→v2 crossings for v1 of monoco.
+	// Compute new versions. Reject v1→v2 crossings for monoco v1.
 	versions := map[string]string{}
 	for modPath, kind := range bumps {
 		old := oldVersions[modPath]
-		newV, err := convco.NextVersion(old, kind)
+		newV, err := bump.NextVersion(old, kind)
 		if err != nil {
 			return nil, fmt.Errorf("next version for %s: %w", modPath, err)
 		}
@@ -182,9 +177,15 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		versions[modPath] = newV
 	}
 
-	// Topological order over workspace reverse-dep edges restricted to
-	// the module set. Kahn-style for determinism.
-	ordered := topoOrder(ws, modules)
+	// Filter skipped modules out of the module set, then topo-order.
+	active := modules[:0:0]
+	for _, m := range modules {
+		if _, isSkip := skipped[m]; isSkip {
+			continue
+		}
+		active = append(active, m)
+	}
+	ordered := topoOrder(ws, active)
 
 	entries := make([]Entry, 0, len(ordered))
 	for _, modPath := range ordered {
@@ -202,7 +203,6 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		})
 	}
 
-	// Train tag.
 	now := opts.Today
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -213,14 +213,12 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		slug = sanitizeSlug(branch)
 	}
 	if slug == "" {
-		slug = "propagate"
+		slug = "release"
 	}
 	train := fmt.Sprintf("train/%s-%s", now.Format("2006-01-02"), slug)
 
 	return &Plan{
 		Root:      ws.Root,
-		OldRef:    oldRef,
-		NewRef:    newRef,
 		Entries:   entries,
 		TrainTag:  train,
 		CommitMsg: "release: " + train,
@@ -236,15 +234,46 @@ func (p *Plan) ModulePaths() []string {
 	return out
 }
 
+// transitiveClosure returns the reverse-dep closure of seeds under ws,
+// deduplicated, sorted.
+func transitiveClosure(ws *workspace.Workspace, seeds []string) []string {
+	seen := map[string]struct{}{}
+	var stack []string
+	for _, s := range seeds {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		stack = append(stack, s)
+	}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, c := range ws.Consumers(cur) {
+			if _, ok := seen[c]; ok {
+				continue
+			}
+			seen[c] = struct{}{}
+			stack = append(stack, c)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // topoOrder returns module paths in a deterministic topological order:
-// if A requires B (B is in workspace), B precedes A.
+// if A requires B (B in workspace), B precedes A.
 func topoOrder(ws *workspace.Workspace, modules []string) []string {
 	inSet := map[string]bool{}
 	for _, m := range modules {
 		inSet[m] = true
 	}
 	inDegree := map[string]int{}
-	edges := map[string][]string{} // B -> [A, ...] where A requires B
+	edges := map[string][]string{}
 	for _, m := range modules {
 		inDegree[m] = 0
 	}
@@ -257,7 +286,6 @@ func topoOrder(ws *workspace.Workspace, modules []string) []string {
 			inDegree[consumer]++
 		}
 	}
-	// Kahn with sorted selection for determinism.
 	var out []string
 	var ready []string
 	for m, d := range inDegree {
@@ -306,8 +334,6 @@ func sanitizeSlug(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// normalizeRelDir strips leading "./" and cleans the path so tag-prefix
-// matching works regardless of how the path was written in go.work.
 func normalizeRelDir(p string) string {
 	p = filepath.ToSlash(filepath.Clean(p))
 	p = strings.TrimPrefix(p, "./")

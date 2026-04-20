@@ -9,7 +9,7 @@ import (
 )
 
 // TestVerificationFailureRollsBack verifies the atomic-release contract:
-// when `propagate apply` detects that a module won't compile in module
+// when `monoco release` detects that a module won't compile in module
 // mode (with a replace-directive shim pointing at the new pseudo-tag),
 // it rolls the release commit back and does NOT push tags.
 //
@@ -19,10 +19,12 @@ import (
 func TestVerificationFailureRollsBack(t *testing.T) {
 	h := newHarness(t)
 
-	// A clean feat on storage so plan has work to do.
+	// A clean change on storage so the release has real work to do.
 	h.writeFeat("storage", "NormalStorage")
 	// A broken commit on api — references storage.Nonexistent_<runID>.
 	h.writeBreakingAPI()
+	// Pin storage locally so release picks it up as direct-affected.
+	h.addLocalReplace("storage")
 
 	planOut := h.plan()
 	t.Logf("plan:\n%s", planOut)
@@ -30,14 +32,14 @@ func TestVerificationFailureRollsBack(t *testing.T) {
 	stdout, stderr := h.applyExpectFail()
 	t.Logf("apply stdout:\n%s\napply stderr:\n%s", stdout, stderr)
 
-	// Tags must not have landed on origin.
 	h.assertRemoteMissingTag("refs/tags/train/" + todayUTC() + "-" + h.runID)
+	h.assertRemoteMissingTag("refs/tags/modules/storage/v0.1.1")
 	h.assertRemoteMissingTag("refs/tags/modules/storage/v0.2.0")
 	h.assertRemoteMissingTag("refs/tags/modules/api/v0.1.1")
-	h.assertRemoteMissingTag("refs/tags/modules/api/v0.2.0")
 
-	// Local branch HEAD should be the broken-api commit — NOT a
-	// release commit. Release-commit subject starts with "release:".
+	// Local branch HEAD should NOT be a release commit — auto-rollback
+	// restored pre-run state. (It will be the workspace-local-replace
+	// commit added by addLocalReplace, not the "release:" commit.)
 	head := trim(mustCapture(t, h.wt, "git", "log", "-1", "--format=%s"))
 	if strings.HasPrefix(head, "release:") {
 		t.Errorf("local HEAD is a release commit — rollback failed; subject=%q", head)

@@ -8,19 +8,24 @@ import (
 	"testing"
 )
 
-// TestMultiModuleFeat verifies that two direct changes in the same
-// commit range produce two "direct" entries plus any cascades, and
-// that all three modules get tagged on the same release commit.
+// TestMultiModuleFeat verifies that two direct changes (each with its
+// own workspace-local replace) produce two "direct" entries plus any
+// cascades, all tagged on the same release commit.
 //
-// storage (leaf) and auth (sibling) both get a direct feat; api
+// storage (leaf) and auth (sibling) both get a direct change; api
 // cascades from storage.
 func TestMultiModuleFeat(t *testing.T) {
 	h := newHarness(t)
 
 	h.writeFeat("storage", "MultiStorage")
 	h.writeFeat("auth", "MultiAuth")
+	h.addLocalReplace("storage")
+	h.addLocalReplace("auth")
 
-	planOut := h.plan()
+	planOut := h.plan(
+		"--bump", "modules/storage=minor",
+		"--bump", "modules/auth=minor",
+	)
 	t.Logf("plan:\n%s", planOut)
 
 	storageMod := h.modPath + "/modules/storage"
@@ -41,7 +46,10 @@ func TestMultiModuleFeat(t *testing.T) {
 		t.Errorf("api direct column: want cascade (via storage), got %s", apiDirect)
 	}
 
-	applyOut := h.apply()
+	applyOut := h.apply(
+		"--bump", "modules/storage=minor",
+		"--bump", "modules/auth=minor",
+	)
 	if !strings.Contains(applyOut, "Pushed to origin") {
 		t.Fatalf("apply did not push:\n%s", applyOut)
 	}

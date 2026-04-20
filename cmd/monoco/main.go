@@ -28,9 +28,12 @@ Task commands (fan out over affected set):
   build    --since <ref>   Run ` + "`go build ./...`" + ` in each affected module.
   generate --since <ref>   Run ` + "`go generate ./...`" + ` in each affected module.
 
-Propagation:
-  propagate plan  --since <ref>   Dry-run a propagation.
-  propagate apply --since <ref>   Execute a propagation.
+Release:
+  release                  Cut a release.
+                           Affected modules = those with workspace-local
+                           ` + "`replace`" + ` directives + transitive consumers.
+                           Every module defaults to a patch bump; override
+                           with --bump <module>=<kind>.
 
 Run "monoco <command> -h" for command-specific flags.
 `
@@ -63,8 +66,8 @@ func main() {
 		cmdTask(root, args, []string{"go", "build", "./..."})
 	case "generate":
 		cmdTask(root, args, []string{"go", "generate", "./..."})
-	case "propagate":
-		cmdPropagate(root, args)
+	case "release":
+		cmdRelease(root, args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
