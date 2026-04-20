@@ -77,16 +77,28 @@ func Batch(keys []string) []string {
 	if err := os.WriteFile(filepath.Join(wt, "modules/storage/storage.go"), []byte(newStorageSrc), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	// 4. Add a workspace-local `replace` in api/go.mod so monoco's replace-
+	//    driven affected detection picks up storage as directly-affected.
+	apiMod := filepath.Join(wt, "modules/api/go.mod")
+	apiModBytes, err := os.ReadFile(apiMod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceLine := "\nreplace " + modPath + "/modules/storage => ../storage\n"
+	if err := os.WriteFile(apiMod, append(apiModBytes, []byte(replaceLine)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	mustRun(t, wt, "git", "add", "-A")
-	mustRun(t, wt, "git", "commit", "-m", "feat(storage): add Batch for integration run "+runID)
+	mustRun(t, wt, "git", "commit", "-m", "wip(storage): add Batch + local replace, run "+runID)
 
-	// 4. Compute the base ref (last commit on main before our branch diverged).
-	base := trim(mustCapture(t, wt, "git", "merge-base", "HEAD", "origin/main"))
-	t.Logf("merge-base with origin/main: %s", base)
-
-	// 5. Run `monoco propagate plan --since <base>` and show the plan in logs.
-	planOut := mustCapture(t, wt, mono, "propagate", "plan", "--since", base, "--slug", runID)
-	t.Logf("propagate plan:\n%s", planOut)
+	// 5. `monoco release --dry-run` — show the plan.
+	planOut := mustCapture(t, wt, mono,
+		"release", "--dry-run",
+		"--bump", "modules/storage=minor",
+		"--slug", runID,
+	)
+	t.Logf("release --dry-run:\n%s", planOut)
 	if !strings.Contains(planOut, modPath+"/modules/storage") {
 		t.Fatalf("plan missing storage entry:\n%s", planOut)
 	}
@@ -97,17 +109,19 @@ func Batch(keys []string) []string {
 		t.Fatalf("plan incorrectly includes auth:\n%s", planOut)
 	}
 
-	// 6. Run `monoco propagate apply` — this is the moment of truth.
-	// It rewrites go.mods, creates a release commit, tags atomically,
-	// and pushes branch + tags to origin.
-	applyOut := mustCapture(t, wt, mono, "propagate", "apply",
-		"--since", base, "--slug", runID, "--remote", "origin")
-	t.Logf("propagate apply:\n%s", applyOut)
+	// 6. `monoco release -y --bump …` — push it.
+	applyOut := mustCapture(t, wt, mono,
+		"release", "-y",
+		"--bump", "modules/storage=minor",
+		"--slug", runID,
+		"--remote", "origin",
+	)
+	t.Logf("release:\n%s", applyOut)
 	if !strings.Contains(applyOut, "Pushed to origin") {
-		t.Fatalf("apply did not push:\n%s", applyOut)
+		t.Fatalf("release did not push:\n%s", applyOut)
 	}
 
-	// 7. Parse the new api version from the apply output's plan table.
+	// 7. Parse the new api version from the dry-run plan output.
 	newAPIVersion := findNewVersion(t, planOut, modPath+"/modules/api")
 	newStorageVersion := findNewVersion(t, planOut, modPath+"/modules/storage")
 	trainTag := "train/" + todayUTC() + "-" + runID

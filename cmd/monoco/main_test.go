@@ -11,8 +11,7 @@ import (
 	"github.com/matt0x6f/monoco/internal/fixture"
 )
 
-func TestCLI_endToEnd(t *testing.T) {
-	// Build the binary once.
+func TestCLI_endToEnd_graphAndTasks(t *testing.T) {
 	bin := buildCLI(t)
 
 	fx := fixture.New(t, fixture.Spec{
@@ -25,56 +24,102 @@ func TestCLI_endToEnd(t *testing.T) {
 	runT(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
 	runT(t, fx.Root, "git", "push", "origin", "main", "--tags")
 
-	// A feat commit on storage.
 	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
 		"package storage\n\nfunc StorageHello() string { return \"new\" }\nfunc Batch() string { return \"b\" }\n")
 	runT(t, fx.Root, "git", "add", "-A")
-	runT(t, fx.Root, "git", "commit", "-m", "feat(storage): add batch")
+	runT(t, fx.Root, "git", "commit", "-m", "storage: add batch")
 
-	// `monoco affected --since HEAD~1`
 	out := runCLI(t, bin, fx.Root, "affected", "--since", "HEAD~1")
 	if !strings.Contains(out, "example.com/mono/storage") || !strings.Contains(out, "example.com/mono/api") {
 		t.Errorf("affected missing expected modules; got: %s", out)
 	}
 
-	// `monoco test --since HEAD~1` — task runner fanout.
 	out = runCLI(t, bin, fx.Root, "test", "--since", "HEAD~1")
 	for _, expected := range []string{"example.com/mono/storage", "example.com/mono/api"} {
 		if !strings.Contains(out, expected) {
 			t.Errorf("test output missing %s; got:\n%s", expected, out)
 		}
 	}
+}
 
-	// `monoco propagate plan --since HEAD~1`
-	out = runCLI(t, bin, fx.Root, "propagate", "plan", "--since", "HEAD~1")
-	if !strings.Contains(out, "v0.2.0") {
-		t.Errorf("plan output missing v0.2.0; got: %s", out)
+func TestCLI_release_withBumpAndReplace(t *testing.T) {
+	bin := buildCLI(t)
+
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+		},
+	})
+	runT(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
+	runT(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
+	runT(t, fx.Root, "git", "push", "origin", "main", "--tags")
+
+	// Add a workspace-local replace in api/go.mod so storage becomes direct-affected.
+	apiMod := filepath.Join(fx.Root, "modules/api/go.mod")
+	b, err := os.ReadFile(apiMod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(apiMod, []byte(string(b)+"\nreplace example.com/mono/storage => ../storage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Also change storage content so the release is meaningful.
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
+		"package storage\n\nfunc StorageHello() string { return \"new\" }\n")
+	runT(t, fx.Root, "git", "add", "-A")
+	runT(t, fx.Root, "git", "commit", "-m", "wip: storage change with local replace")
+
+	// Dry-run first: prints plan, no tags created.
+	out := runCLI(t, bin, fx.Root,
+		"release", "--dry-run",
+		"--bump", "modules/storage=minor",
+		"--slug", "e2e",
+	)
+	for _, want := range []string{"example.com/mono/storage", "v0.2.0", "MODULE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run missing %q; got:\n%s", want, out)
+		}
+	}
+	if tagExists(t, fx.Root, "modules/storage/v0.2.0") {
+		t.Error("dry-run must not create tags")
 	}
 
-	// `monoco propagate plan --since HEAD~1 --show-diffs` — summary plus
-	// unified diff for api/go.mod (the only entry with an in-plan require to rewrite).
-	out = runCLI(t, bin, fx.Root, "propagate", "plan", "--since", "HEAD~1", "--show-diffs")
-	for _, want := range []string{
-		"MODULE",
-		"--- modules/api/go.mod",
-		"+++ modules/api/go.mod (proposed)",
-		"+require example.com/mono/storage v0.2.0",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("plan --show-diffs missing %q; got:\n%s", want, out)
+	// Real run with -y to skip the Proceed? prompt.
+	out = runCLI(t, bin, fx.Root,
+		"release",
+		"-y",
+		"--bump", "modules/storage=minor",
+		"--slug", "e2e",
+	)
+	if !strings.Contains(out, "Pushed to origin") {
+		t.Errorf("release did not push; got: %s", out)
+	}
+	for _, tg := range []string{"modules/storage/v0.2.0", "modules/api/v0.1.1"} {
+		if !tagExists(t, fx.Root, tg) {
+			t.Errorf("missing tag %s", tg)
 		}
 	}
 
-	// `monoco propagate apply --since HEAD~1 --remote=origin`
-	out = runCLI(t, bin, fx.Root, "propagate", "apply", "--since", "HEAD~1", "--remote", "origin", "--slug", "e2e")
-	if !strings.Contains(out, "Pushed to origin") {
-		t.Errorf("apply did not push; got: %s", out)
+	// api/go.mod no longer has the replace; does have the new require.
+	newAPI, _ := os.ReadFile(apiMod)
+	if strings.Contains(string(newAPI), "replace example.com/mono/storage") {
+		t.Errorf("replace not stripped:\n%s", newAPI)
+	}
+	if !strings.Contains(string(newAPI), "example.com/mono/storage v0.2.0") {
+		t.Errorf("require not bumped:\n%s", newAPI)
+	}
+	// api/go.sum has the storage hash lines.
+	apiSum, err := os.ReadFile(filepath.Join(fx.Root, "modules/api/go.sum"))
+	if err != nil {
+		t.Fatalf("read api/go.sum: %v", err)
+	}
+	if !strings.Contains(string(apiSum), "example.com/mono/storage v0.2.0 h1:") {
+		t.Errorf("api/go.sum missing h1: line:\n%s", apiSum)
 	}
 }
 
-// TestCLI_propagatePlanModulesFlag verifies that --modules scopes the plan to
-// exactly the listed modules, ignoring the diff.
-func TestCLI_propagatePlanModulesFlag(t *testing.T) {
+func TestCLI_release_failsClosedWithoutBump(t *testing.T) {
 	bin := buildCLI(t)
 
 	fx := fixture.New(t, fixture.Spec{
@@ -86,25 +131,25 @@ func TestCLI_propagatePlanModulesFlag(t *testing.T) {
 	runT(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
 	runT(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
 
-	// Edit storage — a diff-based plan would cascade api; --modules api should not.
-	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
-		"package storage\n\nfunc StorageHello() string { return \"new\" }\n")
+	apiMod := filepath.Join(fx.Root, "modules/api/go.mod")
+	b, _ := os.ReadFile(apiMod)
+	if err := os.WriteFile(apiMod, []byte(string(b)+"\nreplace example.com/mono/storage => ../storage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runT(t, fx.Root, "git", "add", "-A")
-	runT(t, fx.Root, "git", "commit", "-m", "feat(storage): tweak")
+	runT(t, fx.Root, "git", "commit", "-m", "wip: add replace")
 
-	out := runCLI(t, bin, fx.Root, "propagate", "plan", "--modules", "modules/api")
-	if !strings.Contains(out, "example.com/mono/api") {
-		t.Errorf("plan missing api: %s", out)
-	}
-	if strings.Contains(out, "example.com/mono/storage") {
-		t.Errorf("plan should not include storage when --modules=api: %s", out)
-	}
-
-	// Mutual exclusion: --since + --modules must error.
-	cmd := exec.Command(bin, "propagate", "plan", "--since", "HEAD~1", "--modules", "modules/api")
+	// Non-interactive (stdin is a pipe) with no --bump → must error.
+	cmd := exec.Command(bin, "release", "--dry-run")
 	cmd.Dir = fx.Root
+	cmd.Stdin = strings.NewReader("")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
-		t.Error("expected error combining --since with --modules")
+		t.Fatal("expected failure when no --bump and no TTY")
+	}
+	if !strings.Contains(stderr.String(), "no bump specified") && !strings.Contains(stderr.String(), "supply --bump") {
+		t.Errorf("error should mention missing bump; stderr:\n%s", stderr.String())
 	}
 }
 
@@ -147,4 +192,11 @@ func runT(t *testing.T, dir, name string, args ...string) {
 	if err != nil {
 		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
 	}
+}
+
+func tagExists(t *testing.T, root, tag string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", root, "tag", "-l", tag)
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)) == tag
 }

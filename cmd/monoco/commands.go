@@ -1,96 +1,82 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
+	"github.com/matt0x6f/monoco/internal/bump"
 	"github.com/matt0x6f/monoco/internal/propagate"
+	"github.com/matt0x6f/monoco/internal/release"
 	"github.com/matt0x6f/monoco/internal/workspace"
 )
 
-func cmdPropagate(root string, args []string) {
-	if len(args) == 0 {
-		fatal(fmt.Errorf("propagate: need subcommand (plan|apply)"))
-	}
-	sub := args[0]
-	rest := args[1:]
-	switch sub {
-	case "plan":
-		cmdPropagatePlan(root, rest)
-	case "apply":
-		cmdPropagateApply(root, rest)
-	default:
-		fatal(fmt.Errorf("propagate: unknown subcommand %q", sub))
-	}
+// bumpFlag implements flag.Value so --bump can be passed multiple times.
+type bumpFlag struct {
+	entries []string
 }
 
-func cmdPropagatePlan(root string, args []string) {
-	fs := flag.NewFlagSet("propagate plan", flag.ExitOnError)
-	since := fs.String("since", "", "base ref")
-	slug := fs.String("slug", "", "train tag slug (default: current branch)")
-	modules := fs.String("modules", "", "comma-separated module list (RelDir or module path); skips diff-based affected-set")
-	showDiffs := fs.Bool("show-diffs", false, "also print unified diffs of proposed go.mod rewrites")
-	fs.Parse(args)
-	ws, err := workspace.Load(root)
-	if err != nil {
-		fatal(err)
-	}
-	plan, err := buildPropagatePlan(ws, *since, *modules, propagate.Options{Slug: *slug})
-	if err != nil {
-		fatal(err)
-	}
-	printPlan(plan)
-	if *showDiffs && len(plan.Entries) > 0 {
-		printPlanDiffs(ws, plan)
-	}
-}
+func (b *bumpFlag) String() string     { return strings.Join(b.entries, ",") }
+func (b *bumpFlag) Set(v string) error { b.entries = append(b.entries, v); return nil }
 
-func printPlanDiffs(ws *workspace.Workspace, plan *propagate.Plan) {
-	rewrites, err := propagate.ComputeRewrites(ws, plan)
-	if err != nil {
-		fatal(err)
-	}
-	if len(rewrites) == 0 {
-		return
-	}
-	fmt.Println()
-	// Iterate in plan.Entries order for deterministic output (topo order).
-	for _, e := range plan.Entries {
-		r, ok := rewrites[e.ModulePath]
-		if !ok {
-			continue
-		}
-		display := filepath.Join(ws.Modules[e.ModulePath].RelDir, "go.mod")
-		fmt.Print(propagate.UnifiedDiff(display, r.Old, r.New))
-	}
-}
-
-func cmdPropagateApply(root string, args []string) {
-	fs := flag.NewFlagSet("propagate apply", flag.ExitOnError)
-	since := fs.String("since", "", "base ref")
-	slug := fs.String("slug", "", "train tag slug (default: current branch)")
+func cmdRelease(root string, args []string) {
+	fs := flag.NewFlagSet("release", flag.ExitOnError)
+	var bumps bumpFlag
+	fs.Var(&bumps, "bump", "<module>=<major|minor|patch|skip> (repeatable) — non-interactive bumps")
+	promptCascade := fs.Bool("prompt-cascade", false, "prompt for cascaded modules too (default: auto-patch)")
 	remote := fs.String("remote", "origin", "remote to push to; set to \"\" to skip push")
-	modules := fs.String("modules", "", "comma-separated module list (RelDir or module path); skips diff-based affected-set")
+	slug := fs.String("slug", "", "train-tag slug (default: current branch)")
+	dryRun := fs.Bool("dry-run", false, "print plan and exit")
+	assumeYes := fs.Bool("y", false, "skip interactive Proceed? confirmation")
 	fs.Parse(args)
+
 	ws, err := workspace.Load(root)
 	if err != nil {
 		fatal(err)
 	}
-	plan, err := buildPropagatePlan(ws, *since, *modules, propagate.Options{Slug: *slug})
+	bumpMap, err := parseBumpFlags(ws, bumps.entries)
 	if err != nil {
 		fatal(err)
 	}
-	if len(plan.Entries) == 0 {
-		fmt.Println("nothing to propagate.")
+
+	var prompter release.Prompter
+	if isInteractive() {
+		prompter = release.NewStdioPrompter(os.Stdin, os.Stdout)
+	}
+
+	opts := release.Options{
+		Bumps:         bumpMap,
+		PromptCascade: *promptCascade,
+		Slug:          *slug,
+		Remote:        *remote,
+	}
+
+	plan, err := release.Plan(ws, opts, prompter, os.Stdout)
+	if err != nil {
+		fatal(err)
+	}
+	if plan == nil {
 		return
 	}
-	fmt.Println("Plan:")
-	printPlan(plan)
-	res, err := propagate.Apply(ws, plan, propagate.ApplyOptions{Remote: *remote})
+	if *dryRun {
+		return
+	}
+
+	if !*assumeYes {
+		in := bufio.NewReader(os.Stdin)
+		ok, err := release.ConfirmProceed(in, os.Stdout)
+		if err != nil {
+			fatal(fmt.Errorf("read confirmation: %w", err))
+		}
+		if !ok {
+			fmt.Println("aborted.")
+			return
+		}
+	}
+
+	res, err := release.Apply(ws, plan, opts)
 	if err != nil {
 		fatal(err)
 	}
@@ -103,69 +89,32 @@ func cmdPropagateApply(root string, args []string) {
 	}
 }
 
-// buildPropagatePlan dispatches to NewPlan or NewPlanForModules based on which
-// of --since / --modules was set, and enforces mutual exclusion.
-func buildPropagatePlan(ws *workspace.Workspace, since, modules string, opts propagate.Options) (*propagate.Plan, error) {
-	if since != "" && modules != "" {
-		return nil, fmt.Errorf("--since and --modules are mutually exclusive; pick one")
-	}
-	if since == "" && modules == "" {
-		return nil, fmt.Errorf("must specify --since or --modules")
-	}
-	if modules != "" {
-		refs, err := splitModulesList(modules)
+func parseBumpFlags(ws *workspace.Workspace, entries []string) (map[string]bump.Kind, error) {
+	out := map[string]bump.Kind{}
+	for _, e := range entries {
+		eq := strings.IndexByte(e, '=')
+		if eq < 1 || eq == len(e)-1 {
+			return nil, fmt.Errorf("--bump %q: want <module>=<kind>", e)
+		}
+		ref := strings.TrimSpace(e[:eq])
+		kindStr := strings.TrimSpace(e[eq+1:])
+		mp, ok := propagate.ResolveModuleRef(ws, ref)
+		if !ok {
+			return nil, fmt.Errorf("--bump %q: module %q not found in workspace", e, ref)
+		}
+		k, err := bump.Parse(kindStr)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("--bump %q: %w", e, err)
 		}
-		paths := make([]string, 0, len(refs))
-		for _, r := range refs {
-			p, ok := propagate.ResolveModuleRef(ws, r)
-			if !ok {
-				return nil, fmt.Errorf("module %q not found in workspace", r)
-			}
-			paths = append(paths, p)
-		}
-		return propagate.NewPlanForModules(ws, paths, opts)
-	}
-	return propagate.NewPlan(ws, since, "HEAD", opts)
-}
-
-// splitModulesList parses the --modules CSV value, trimming whitespace and
-// rejecting empty entries.
-func splitModulesList(v string) ([]string, error) {
-	raw := strings.Split(v, ",")
-	out := make([]string, 0, len(raw))
-	for _, s := range raw {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			return nil, fmt.Errorf("--modules has empty entry")
-		}
-		out = append(out, s)
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("--modules is empty")
+		out[mp] = k
 	}
 	return out, nil
 }
 
-func printPlan(plan *propagate.Plan) {
-	if len(plan.Entries) == 0 {
-		fmt.Println("(no modules affected)")
-		return
+func isInteractive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
 	}
-	fmt.Printf("Train: %s\n\n", plan.TrainTag)
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "MODULE\tOLD\tNEW\tKIND\tDIRECT")
-	for _, e := range plan.Entries {
-		old := e.OldVersion
-		if old == "" {
-			old = "(none)"
-		}
-		direct := "cascade"
-		if e.DirectChange {
-			direct = "direct"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.ModulePath, old, e.NewVersion, e.Kind, direct)
-	}
-	tw.Flush()
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
