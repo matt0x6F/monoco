@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -32,6 +33,7 @@ func cmdPropagatePlan(root string, args []string) {
 	since := fs.String("since", "", "base ref")
 	slug := fs.String("slug", "", "train tag slug (default: current branch)")
 	modules := fs.String("modules", "", "comma-separated module list (RelDir or module path); skips diff-based affected-set")
+	showDiffs := fs.Bool("show-diffs", false, "also print unified diffs of proposed go.mod rewrites")
 	fs.Parse(args)
 	ws, err := workspace.Load(root)
 	if err != nil {
@@ -42,6 +44,29 @@ func cmdPropagatePlan(root string, args []string) {
 		fatal(err)
 	}
 	printPlan(plan)
+	if *showDiffs && len(plan.Entries) > 0 {
+		printPlanDiffs(ws, plan)
+	}
+}
+
+func printPlanDiffs(ws *workspace.Workspace, plan *propagate.Plan) {
+	rewrites, err := propagate.ComputeRewrites(ws, plan)
+	if err != nil {
+		fatal(err)
+	}
+	if len(rewrites) == 0 {
+		return
+	}
+	fmt.Println()
+	// Iterate in plan.Entries order for deterministic output (topo order).
+	for _, e := range plan.Entries {
+		r, ok := rewrites[e.ModulePath]
+		if !ok {
+			continue
+		}
+		display := filepath.Join(ws.Modules[e.ModulePath].RelDir, "go.mod")
+		fmt.Print(propagate.UnifiedDiff(display, r.Old, r.New))
+	}
 }
 
 func cmdPropagateApply(root string, args []string) {

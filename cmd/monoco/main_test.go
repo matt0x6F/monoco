@@ -51,6 +51,20 @@ func TestCLI_endToEnd(t *testing.T) {
 		t.Errorf("plan output missing v0.2.0; got: %s", out)
 	}
 
+	// `monoco propagate plan --since HEAD~1 --show-diffs` — summary plus
+	// unified diff for api/go.mod (the only entry with an in-plan require to rewrite).
+	out = runCLI(t, bin, fx.Root, "propagate", "plan", "--since", "HEAD~1", "--show-diffs")
+	for _, want := range []string{
+		"MODULE",
+		"--- modules/api/go.mod",
+		"+++ modules/api/go.mod (proposed)",
+		"+require example.com/mono/storage v0.2.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plan --show-diffs missing %q; got:\n%s", want, out)
+		}
+	}
+
 	// `monoco propagate apply --since HEAD~1 --remote=origin`
 	out = runCLI(t, bin, fx.Root, "propagate", "apply", "--since", "HEAD~1", "--remote", "origin", "--slug", "e2e")
 	if !strings.Contains(out, "Pushed to origin") {

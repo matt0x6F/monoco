@@ -108,28 +108,41 @@ func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult
 	return result, nil
 }
 
-// rewriteGoMods rewrites each entry's require lines to new versions of
-// other entries also in the plan.
-func rewriteGoMods(ws *workspace.Workspace, plan *Plan) error {
+// RewrittenMod is the proposed result of rewriting a single go.mod.
+// Only modules whose go.mod actually changes are returned by ComputeRewrites.
+type RewrittenMod struct {
+	GoModPath string // absolute path to go.mod
+	Old       []byte // current bytes on disk
+	New       []byte // proposed bytes after applying the plan's version bumps
+}
+
+// ComputeRewrites returns the proposed go.mod rewrites for plan, in memory.
+// It does not touch the filesystem. Both Apply and `propagate plan --show-diffs`
+// consume this so the preview is byte-identical to what apply writes.
+//
+// The returned map is keyed by Entry.ModulePath. Modules whose go.mod has no
+// in-plan require to update are omitted (no change to write).
+func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenMod, error) {
 	newVersions := map[string]string{}
 	for _, e := range plan.Entries {
 		newVersions[e.ModulePath] = e.NewVersion
 	}
+	out := map[string]RewrittenMod{}
 	for _, e := range plan.Entries {
 		goModPath := filepath.Join(ws.Modules[e.ModulePath].Dir, "go.mod")
 		b, err := os.ReadFile(goModPath)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", goModPath, err)
+			return nil, fmt.Errorf("read %s: %w", goModPath, err)
 		}
 		mf, err := modfile.Parse(goModPath, b, nil)
 		if err != nil {
-			return fmt.Errorf("parse %s: %w", goModPath, err)
+			return nil, fmt.Errorf("parse %s: %w", goModPath, err)
 		}
 		changed := false
 		for _, req := range mf.Require {
 			if newV, inPlan := newVersions[req.Mod.Path]; inPlan {
 				if err := mf.AddRequire(req.Mod.Path, newV); err != nil {
-					return fmt.Errorf("update require %s: %w", req.Mod.Path, err)
+					return nil, fmt.Errorf("update require %s: %w", req.Mod.Path, err)
 				}
 				changed = true
 			}
@@ -138,12 +151,25 @@ func rewriteGoMods(ws *workspace.Workspace, plan *Plan) error {
 			continue
 		}
 		mf.Cleanup()
-		out, err := mf.Format()
+		formatted, err := mf.Format()
 		if err != nil {
-			return fmt.Errorf("format %s: %w", goModPath, err)
+			return nil, fmt.Errorf("format %s: %w", goModPath, err)
 		}
-		if err := os.WriteFile(goModPath, out, 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", goModPath, err)
+		out[e.ModulePath] = RewrittenMod{GoModPath: goModPath, Old: b, New: formatted}
+	}
+	return out, nil
+}
+
+// rewriteGoMods rewrites each entry's require lines to new versions of
+// other entries also in the plan.
+func rewriteGoMods(ws *workspace.Workspace, plan *Plan) error {
+	rewrites, err := ComputeRewrites(ws, plan)
+	if err != nil {
+		return err
+	}
+	for _, r := range rewrites {
+		if err := os.WriteFile(r.GoModPath, r.New, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", r.GoModPath, err)
 		}
 	}
 	return nil
