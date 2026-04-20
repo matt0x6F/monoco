@@ -90,4 +90,5 @@ Pre-1.0. Design validated by four POCs ([findings](pocs/FINDINGS.md)).
 
 - [Design spec](docs/superpowers/specs/).
 - [POC findings](pocs/FINDINGS.md).
-- Tests: `go test ./...`. End-to-end CLI: `go test ./cmd/monoco/... -count=1`. Integration against a real GitHub remote: `go test -tags=integration ./test/integration/... -v -count=1`.
+- Tests: `go test ./...`. End-to-end (local-fixture): `go test ./cmd/monoco/... -count=1`.
+- Integration (against the real GitHub test monorepo) runs on every push to `main` via `.github/workflows/integration.yml`. To run locally: `MONOCO_TEST_REPO_TOKEN=<PAT> go test -tags=integration ./test/integration/... -v`. See [test/integration/README.md](test/integration/README.md) for the scenario matrix and troubleshooting.

@@ -1,0 +1,52 @@
+name: integration
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Per-run branches and tags on the test repo are namespaced by a
+# timestamp+hex runID, so parallel runs can't collide. We still
+# serialize the workflow to keep logs clean and spare GitHub's API
+# rate limit.
+concurrency:
+  group: integration
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # Belt-and-suspenders guard: secret won't be populated on fork PRs.
+    # Since this workflow only runs on push-to-main + workflow_dispatch,
+    # the secret is always available on approved runs, but the check
+    # keeps the error message actionable if someone misconfigures the
+    # repo.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.repository == 'matt0x6F/monoco' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Preflight — token present?
+        env:
+          TOKEN: ${{ secrets.MONOCO_TEST_REPO_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::MONOCO_TEST_REPO_TOKEN is empty. Add a fine-grained PAT with contents:write on monoco-test-monorepo."
+            exit 1
+          fi
+          echo "token present (length=${#TOKEN})"
+
+      - name: Run integration suite
+        env:
+          MONOCO_TEST_REPO_TOKEN: ${{ secrets.MONOCO_TEST_REPO_TOKEN }}
+          MONOCO_TEST_REPO_HTTPS: https://github.com/matt0x6F/monoco-test-monorepo.git
+        run: |
+          go test -tags=integration ./test/integration/... -v -count=1 -timeout=15m
