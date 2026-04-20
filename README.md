@@ -79,4 +79,5 @@ Pre-1.0. v0.1.0 is the first working end-to-end release. Design validated by thr
 - [Design spec](docs/superpowers/specs/) (via brainstorming session — see git history).
 - [POC findings](pocs/FINDINGS.md).
 - [v1 implementation plan](docs/superpowers/plans/2026-04-18-monoco-v1.md).
-- Tests: `go test ./...`. End-to-end: `go test ./cmd/monoco/... -count=1`.
+- Tests: `go test ./...`. End-to-end (local-fixture): `go test ./cmd/monoco/... -count=1`.
+- Integration (against the real GitHub test monorepo) runs on every push to `main` via `.github/workflows/integration.yml`. To run locally: `MONOCO_TEST_REPO_TOKEN=<PAT> go test -tags=integration ./test/integration/... -v`. See [test/integration/README.md](test/integration/README.md) for the scenario matrix and troubleshooting.

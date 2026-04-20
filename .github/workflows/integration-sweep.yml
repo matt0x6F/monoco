@@ -1,0 +1,103 @@
+name: integration-sweep
+
+# Deletes stale test/<runID> branches and their module/train tags on
+# the monoco-test-monorepo to keep the test repo tidy. Runs nightly
+# and on demand. Uses the same PAT as the integration workflow.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (list only, delete nothing)'
+        type: boolean
+        default: true
+      max_age_days:
+        description: 'Delete refs older than this many days'
+        type: string
+        default: '7'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Sweep old test refs
+        env:
+          GH_TOKEN: ${{ secrets.MONOCO_TEST_REPO_TOKEN }}
+          # Scheduled runs have no inputs — default to dry=false (act)
+          # with a 7-day window. Manual runs honor the inputs above.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          MAX_AGE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_age_days || '7' }}
+          REPO: matt0x6F/monoco-test-monorepo
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::MONOCO_TEST_REPO_TOKEN missing"
+            exit 1
+          fi
+
+          cutoff_ts=$(date -u -d "$MAX_AGE_DAYS days ago" +%s)
+          echo "Sweeping refs older than $MAX_AGE_DAYS days (before $(date -u -d @$cutoff_ts -Iseconds))"
+          echo "Dry run: $DRY_RUN"
+
+          # --- branches: test/* ---
+          # List branches with their commit timestamps via the refs API.
+          # Paginate through all pages.
+          branches=$(gh api --paginate "repos/$REPO/branches?per_page=100" \
+            --jq '.[] | select(.name | startswith("test/")) | .name')
+
+          for br in $branches; do
+            # Get the tip commit date.
+            committed=$(gh api "repos/$REPO/branches/$br" \
+              --jq '.commit.commit.committer.date')
+            ts=$(date -u -d "$committed" +%s)
+            if [ "$ts" -lt "$cutoff_ts" ]; then
+              echo "stale branch: $br (committed $committed)"
+              if [ "$DRY_RUN" = "false" ]; then
+                # Branch ref deletion via Git refs API.
+                gh api --method DELETE "repos/$REPO/git/refs/heads/$br" || \
+                  echo "::warning::failed to delete branch $br"
+              fi
+            fi
+          done
+
+          # --- tags: modules/* and train/* ---
+          # Tag age = tagged commit's committer date.
+          tags=$(gh api --paginate "repos/$REPO/git/matching-refs/tags/" \
+            --jq '.[] | .ref' | sed 's|^refs/tags/||')
+
+          for tag in $tags; do
+            case "$tag" in
+              modules/*|train/*) ;;
+              *) continue ;;
+            esac
+            # Resolve tag to commit, then read commit date.
+            sha=$(gh api "repos/$REPO/git/refs/tags/$tag" --jq '.object.sha')
+            # Annotated tags point at a tag object; peel if needed.
+            obj_type=$(gh api "repos/$REPO/git/refs/tags/$tag" --jq '.object.type')
+            if [ "$obj_type" = "tag" ]; then
+              sha=$(gh api "repos/$REPO/git/tags/$sha" --jq '.object.sha')
+            fi
+            committed=$(gh api "repos/$REPO/git/commits/$sha" \
+              --jq '.committer.date')
+            ts=$(date -u -d "$committed" +%s)
+            if [ "$ts" -lt "$cutoff_ts" ]; then
+              echo "stale tag: $tag (committed $committed)"
+              if [ "$DRY_RUN" = "false" ]; then
+                gh api --method DELETE "repos/$REPO/git/refs/tags/$tag" || \
+                  echo "::warning::failed to delete tag $tag"
+              fi
+            fi
+          done
+
+          echo "sweep done."
