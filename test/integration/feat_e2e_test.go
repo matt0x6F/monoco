@@ -53,6 +53,12 @@ func TestFeatEndToEnd(t *testing.T) {
 	h.assertRemoteHasTag("refs/tags/modules/api/" + apiNew)
 	h.assertRemoteHasTag("refs/tags/train/" + todayUTC() + "-" + h.runID)
 
+	// The release commit must also carry api/go.sum — precomputed h1:
+	// lines for the freshly-tagged storage version. Without this, a
+	// consumer building against api@<new> with -mod=readonly fails.
+	h.assertReleaseCommitTouches("api", "go.mod")
+	h.assertReleaseCommitTouches("api", "go.sum")
+
 	// External-consumer probe — the highest-confidence check.
 	h.consumerProbe(apiNew)
 	t.Logf("consumer build succeeded against %s/modules/api@%s", h.modPath, apiNew)

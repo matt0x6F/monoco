@@ -40,20 +40,25 @@ with `dry_run=true` first if you're uncertain.
 |---|---|
 | `TestFeatEndToEnd` | Flagship: plan → apply → remote tags → external consumer `go get` |
 | `TestNoChangeIsNoOp` | Empty range produces no plan, no push |
-| `TestFixCommitIsPatchBump` | `fix:` → patch bump, cascades as patch |
-| `TestBreakingChangeOnV0` | `feat!:` classified major; v0.x version bump stays within v0 |
+| `TestFixCommitIsPatchBump` | Default patch bump (no `--bump` override); cascades as patch |
+| `TestBreakingChangeOnV0` | `--bump=major` on a v0 module stays within v0 (pre-1.0 rule) |
 | `TestMultiModuleFeat` | Two direct changes + cascade, all tagged on one release commit |
 | `TestVerificationFailureRollsBack` | Broken api.go → apply fails → no tags, no release commit |
-| `TestPlanOnlyDoesNotMutate` | `propagate plan` is read-only |
+| `TestPlanOnlyDoesNotMutate` | `release --dry-run` is read-only |
 
 ## Adding a scenario
 
 1. Create `test/integration/<scenario>_test.go` with `//go:build integration`.
 2. `h := newHarness(t)` — clones, branches, builds the CLI.
 3. Make commits via `h.writeFeat` / `h.writeFix` / `h.writeBreaking` /
-   `h.writeBreakingAPI`.
-4. Call `h.plan()` / `h.apply()` and assert on the stdout plus remote
-   state via `h.assertRemoteHasTag` / `h.assertRemoteMissingTag`.
+   `h.writeBreakingAPI`. The commit-message prefixes are cosmetic —
+   bumps are declared at release time via `--bump <module>=<kind>`, not
+   inferred from commit messages.
+4. Call `h.addLocalReplace(<target>)` to install the workspace-local
+   `replace` directive that marks the target module as direct-affected.
+5. Call `h.plan(...)` / `h.apply(...)` with any `--bump` overrides your
+   scenario needs, and assert on stdout plus remote state via
+   `h.assertRemoteHasTag` / `h.assertRemoteMissingTag`.
 
 Each test's branch and tags are namespaced with a unique `runID`
 (timestamp + 6 hex chars), so scenarios don't collide with each other

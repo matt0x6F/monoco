@@ -260,6 +260,25 @@ func (h *harness) assertRemoteHasTag(ref string) {
 	}
 }
 
+// assertReleaseCommitTouches fails the test if the local HEAD (which
+// after `apply` is the release commit) does not include a change to
+// modules/<module>/<file>. Use this to lock in that downstream go.sum
+// files actually land in the commit — a regression in the go.sum
+// writing path is otherwise silent: the build still succeeds via the
+// proxy populating go.sum lazily, but offline/readonly consumers
+// break.
+func (h *harness) assertReleaseCommitTouches(module, file string) {
+	h.t.Helper()
+	rel := "modules/" + module + "/" + file
+	out := mustCapture(h.t, h.wt, "git", "show", "--name-only", "--pretty=format:", "HEAD")
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == rel {
+			return
+		}
+	}
+	h.t.Errorf("release commit does not touch %s\nfiles changed:\n%s", rel, out)
+}
+
 // assertRemoteMissingTag fails the test if the given tag ref IS present.
 func (h *harness) assertRemoteMissingTag(ref string) {
 	h.t.Helper()

@@ -62,4 +62,10 @@ func TestMultiModuleFeat(t *testing.T) {
 	} {
 		h.assertRemoteHasTag(tag)
 	}
+
+	// api consumes storage (and nothing else in the plan), so the
+	// release commit must update api/go.mod and populate api/go.sum
+	// with the precomputed h1: line for storage@<new>.
+	h.assertReleaseCommitTouches("api", "go.mod")
+	h.assertReleaseCommitTouches("api", "go.sum")
 }
