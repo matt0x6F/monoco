@@ -99,6 +99,13 @@ func newHarness(t *testing.T) *harness {
 	mustRunRetry(t, "", 3, "git", "clone", "--depth", "50", cloneURL, wt)
 	mustRun(t, wt, "git", "config", "user.email", "integration-test@monoco.example")
 	mustRun(t, wt, "git", "config", "user.name", "monoco integration test")
+	// Shallow clone only brings tags reachable from fetched history.
+	// Module tags from prior runs point at per-run commits that aren't
+	// on main, so they'd be invisible locally — causing monoco to plan
+	// a bump onto a version that already exists remotely and then get
+	// rejected by atomic push. Fetch all tags explicitly so the local
+	// tag state matches the remote's public API.
+	mustRunRetry(t, wt, 3, "git", "fetch", "--tags", "origin")
 	mustRun(t, wt, "git", "checkout", "-b", branch)
 
 	base := trim(mustCapture(t, wt, "git", "merge-base", "HEAD", "origin/main"))
