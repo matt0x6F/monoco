@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **Optional `monoco.yaml` manifest** at the repo root for per-module opt-outs and task command overrides. An absent manifest preserves current defaults. ([#1](https://github.com/matt0x6f/monoco/issues/1))
+  - `exclude:` — list repo-relative module dirs (same form as `go.work` use entries). Excluded modules are invisible to `affected`, `release`, and task fanout: no tags, no rewrites, not counted as consumers.
+  - `tasks.<name>.command:` — override the argv for `test`, `lint`, `build`, or `generate`. Omitted tasks keep their built-in defaults (`go test ./...`, `golangci-lint run`, etc.).
+  - Unknown keys and unrecognized task names are rejected at load time so typos aren't silently ignored.
+  - `monoco init` writes a commented stub `monoco.yaml` alongside `go.work` if none exists. Re-running `init` never clobbers an existing manifest.
+
+### Technical
+
+- New `internal/config` package. `workspace.Load` now consults the manifest and omits excluded modules from the returned graph; `workspace.LoadWithConfig` exposed for callers that need to inspect the manifest separately.
+
 ### Breaking
 
 - **`monoco propagate plan` and `monoco propagate apply` are removed.** Replaced by `monoco release` (see below). Old scripts using `propagate` must migrate to `release --bump <module>=<kind>`.

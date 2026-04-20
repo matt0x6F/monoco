@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/matt0x6f/monoco/internal/config"
 	"golang.org/x/mod/modfile"
 )
 
@@ -33,7 +34,30 @@ type Workspace struct {
 //
 // Only edges where BOTH endpoints are workspace modules are retained.
 // External dependencies are ignored (they don't participate in propagation).
+//
+// Load also reads the optional <root>/monoco.yaml manifest; any module
+// listed under `exclude` is dropped from the returned workspace as if
+// its go.work entry had never been declared. An absent manifest is not
+// an error.
 func Load(root string) (*Workspace, error) {
+	cfg, err := config.Load(root)
+	if err != nil {
+		return nil, err
+	}
+	return loadWithConfig(root, cfg)
+}
+
+// LoadWithConfig is like Load but takes an already-parsed config. Useful
+// in tests and for callers that need to inspect the manifest separately.
+func LoadWithConfig(root string, cfg *config.Config) (*Workspace, error) {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	return loadWithConfig(root, cfg)
+}
+
+func loadWithConfig(root string, cfg *config.Config) (*Workspace, error) {
+	excluded := cfg.ExcludedSet()
 	workPath := filepath.Join(root, "go.work")
 	workBytes, err := os.ReadFile(workPath)
 	if err != nil {
@@ -57,6 +81,9 @@ func Load(root string) (*Workspace, error) {
 	var parsedMods []parsed
 
 	for _, u := range wf.Use {
+		if _, skip := excluded[normalizeUsePath(u.Path)]; skip {
+			continue
+		}
 		dir := filepath.Join(root, u.Path)
 		gmBytes, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 		if err != nil {
@@ -85,6 +112,16 @@ func Load(root string) (*Workspace, error) {
 	}
 
 	return ws, nil
+}
+
+// normalizeUsePath converts a go.work `use` entry (e.g. "./modules/foo"
+// or "modules/foo") to the same slash-form the exclude list is normalized
+// to (see config.Config.normalize).
+func normalizeUsePath(p string) string {
+	p = filepath.ToSlash(filepath.Clean(p))
+	// filepath.Clean leaves leading "./" stripped on most platforms, but
+	// be defensive for inputs like "./x" that Clean turns into "x" already.
+	return p
 }
 
 // Consumers returns the set of workspace modules that directly require mod.

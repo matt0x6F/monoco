@@ -78,9 +78,38 @@ If anything before the push fails, the working tree and refs are restored to the
 
 Pre-1.0. Design validated by four POCs ([findings](pocs/FINDINGS.md)).
 
+## Configuration (`monoco.yaml`, optional)
+
+Drop a `monoco.yaml` at the repo root if you need to deviate from the defaults. `monoco init` writes a commented stub. An absent manifest is equivalent to:
+
+```yaml
+version: 1
+
+# Modules excluded from propagation, affected-set, and task fanout.
+# Paths match your go.work use entries.
+exclude: []
+
+# Per-task argv overrides. Omitted tasks keep their built-in defaults
+# (go test ./..., golangci-lint run, go build ./..., go generate ./...).
+tasks: {}
+```
+
+Example:
+
+```yaml
+version: 1
+exclude:
+  - modules/internal-experimental
+  - modules/private-sdk
+tasks:
+  lint:
+    command: ["golangci-lint", "run", "--timeout=5m"]
+```
+
+Excluded modules never show up in `monoco affected`, `monoco release`, or task fanout — no tags, no `go.mod` rewrites, not counted as consumers of anything.
+
 ## Not in scope (yet)
 
-- `monoco.yaml` manifest with per-module opt-outs and task command overrides.
 - v2+ major-version path rewriting.
 - Forward-propagation of orphan tags cut by hand.
 - PR creation (intentionally forge-agnostic — wrap with `gh` / `glab` / whatever).

@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -57,6 +59,41 @@ func TestLoad_moduleDirResolvable(t *testing.T) {
 	}
 	if m.RelDir == "" {
 		t.Fatal("Module.RelDir empty")
+	}
+}
+
+func TestLoad_honorsMonocoYamlExcludes(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+			{Name: "private", DependsOn: []string{"storage"}},
+		},
+	})
+
+	// Drop a monoco.yaml that excludes modules/private.
+	manifest := "version: 1\nexclude:\n  - modules/private\n"
+	if err := os.WriteFile(filepath.Join(fx.Root, "monoco.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	ws, err := Load(fx.Root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if _, ok := ws.Modules["example.com/mono/private"]; ok {
+		t.Errorf("excluded module example.com/mono/private still present in workspace")
+	}
+	if _, ok := ws.Modules["example.com/mono/api"]; !ok {
+		t.Errorf("non-excluded module example.com/mono/api missing")
+	}
+	// The excluded consumer shouldn't show up as a reverse-dep of storage.
+	consumers := ws.Consumers("example.com/mono/storage")
+	for _, c := range consumers {
+		if c == "example.com/mono/private" {
+			t.Errorf("excluded module still in reverse-dep edges: %v", consumers)
+		}
 	}
 }
 
