@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/matt0x6f/monoco/internal/affected"
+	"github.com/matt0x6f/monoco/internal/config"
 	"github.com/matt0x6f/monoco/internal/gitgraph"
 	"github.com/matt0x6f/monoco/internal/tasks"
 	"github.com/matt0x6f/monoco/internal/workspace"
@@ -59,13 +60,13 @@ func main() {
 	case "affected":
 		cmdAffected(root, args)
 	case "test":
-		cmdTask(root, args, []string{"go", "test", "./..."})
+		cmdTask(root, args, "test", []string{"go", "test", "./..."})
 	case "lint":
-		cmdTask(root, args, []string{"golangci-lint", "run"})
+		cmdTask(root, args, "lint", []string{"golangci-lint", "run"})
 	case "build":
-		cmdTask(root, args, []string{"go", "build", "./..."})
+		cmdTask(root, args, "build", []string{"go", "build", "./..."})
 	case "generate":
-		cmdTask(root, args, []string{"go", "generate", "./..."})
+		cmdTask(root, args, "generate", []string{"go", "generate", "./..."})
 	case "release":
 		cmdRelease(root, args)
 	case "-h", "--help", "help":
@@ -81,7 +82,8 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-// cmdInit walks the repo for go.mod files and writes go.work.
+// cmdInit walks the repo for go.mod files and writes go.work. It also
+// drops a stub monoco.yaml alongside, if none exists yet.
 func cmdInit(root string, args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	fs.Parse(args)
@@ -93,6 +95,45 @@ func cmdInit(root string, args []string) {
 		fatal(err)
 	}
 	fmt.Printf("wrote go.work with %d module(s)\n", len(dirs))
+	wrote, err := writeManifestStubIfMissing(root)
+	if err != nil {
+		fatal(err)
+	}
+	if wrote {
+		fmt.Printf("wrote stub %s\n", config.Filename)
+	}
+}
+
+const manifestStub = `# monoco.yaml — optional configuration.
+# An absent manifest is equivalent to defaults below. Uncomment + edit
+# the sections you need and delete the rest; unknown keys are rejected.
+version: 1
+
+# Modules excluded from propagation (no tags, no go.mod rewrites) and
+# from affected-set / task fanout. Paths match your go.work use entries.
+# exclude:
+#   - modules/internal-experimental
+#   - modules/private-sdk
+
+# Per-task command overrides. Omitted tasks fall back to built-in
+# defaults: go test ./...  /  golangci-lint run  /  go build ./...
+# /  go generate ./...
+# tasks:
+#   lint:
+#     command: ["golangci-lint", "run", "--timeout=5m"]
+`
+
+func writeManifestStubIfMissing(root string) (bool, error) {
+	path := filepath.Join(root, config.Filename)
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := os.WriteFile(path, []byte(manifestStub), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // cmdSync is identical to cmdInit for v1 (idempotent).
@@ -173,13 +214,23 @@ func computeAffectedForRange(ws *workspace.Workspace, oldRef, newRef string) ([]
 	return affected.Compute(ws, direct), nil
 }
 
-// cmdTask fans out a command over the affected module set.
-func cmdTask(root string, args []string, command []string) {
+// cmdTask fans out a command over the affected module set. If
+// monoco.yaml overrides the named task's command, that override replaces
+// defaultCommand.
+func cmdTask(root string, args []string, taskName string, defaultCommand []string) {
 	fs := flag.NewFlagSet("task", flag.ExitOnError)
 	since := fs.String("since", "", "base ref (e.g. main, origin/main, SHA)")
 	all := fs.Bool("all", false, "run against every workspace module, not just affected")
 	fs.Parse(args)
-	ws, err := workspace.Load(root)
+	cfg, err := config.Load(root)
+	if err != nil {
+		fatal(err)
+	}
+	command := defaultCommand
+	if override := cfg.TaskCommand(taskName); override != nil {
+		command = override
+	}
+	ws, err := workspace.LoadWithConfig(root, cfg)
 	if err != nil {
 		fatal(err)
 	}

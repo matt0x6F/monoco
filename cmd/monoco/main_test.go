@@ -146,6 +146,82 @@ func TestCLI_release_defaultsDirectToPatchWithoutBump(t *testing.T) {
 	}
 }
 
+func TestCLI_init_writesStubManifest(t *testing.T) {
+	bin := buildCLI(t)
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+
+	// init over an already-initialized fixture: go.work exists, monoco.yaml does not.
+	path := filepath.Join(fx.Root, "monoco.yaml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("pre-condition: monoco.yaml should not exist, got err=%v", err)
+	}
+	runCLI(t, bin, fx.Root, "init")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("monoco.yaml not written by init: %v", err)
+	}
+
+	// Second init leaves the user's existing manifest alone.
+	custom := []byte("version: 1\nexclude:\n  - modules/storage\n")
+	if err := os.WriteFile(path, custom, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCLI(t, bin, fx.Root, "init")
+	got, _ := os.ReadFile(path)
+	if string(got) != string(custom) {
+		t.Errorf("init clobbered an existing monoco.yaml:\n%s", got)
+	}
+}
+
+func TestCLI_excludedModuleIgnoredByAffected(t *testing.T) {
+	bin := buildCLI(t)
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "private", DependsOn: []string{"storage"}},
+		},
+	})
+	runT(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
+	runT(t, fx.Root, "git", "tag", "modules/private/v0.1.0")
+
+	// Exclude modules/private, then touch storage — affected should list
+	// storage but NOT private, even though private depends on it.
+	if err := os.WriteFile(filepath.Join(fx.Root, "monoco.yaml"),
+		[]byte("version: 1\nexclude:\n  - modules/private\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
+		"package storage\n\nfunc Hello() string { return \"hi\" }\n")
+	runT(t, fx.Root, "git", "add", "-A")
+	runT(t, fx.Root, "git", "commit", "-m", "storage edit")
+
+	out := runCLI(t, bin, fx.Root, "affected", "--since", "HEAD~1")
+	if !strings.Contains(out, "example.com/mono/storage") {
+		t.Errorf("affected missing storage:\n%s", out)
+	}
+	if strings.Contains(out, "example.com/mono/private") {
+		t.Errorf("excluded module appeared in affected:\n%s", out)
+	}
+}
+
+func TestCLI_taskOverrideFromManifest(t *testing.T) {
+	bin := buildCLI(t)
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	// Override `test` with an echo so we don't run real `go test`; the
+	// output must show the marker we supplied.
+	manifest := "version: 1\ntasks:\n  test:\n    command: [\"/bin/echo\", \"MARKER_XYZ\"]\n"
+	if err := os.WriteFile(filepath.Join(fx.Root, "monoco.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := runCLI(t, bin, fx.Root, "test", "--all")
+	if !strings.Contains(out, "MARKER_XYZ") {
+		t.Errorf("task override not applied; output:\n%s", out)
+	}
+}
+
 func buildCLI(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
