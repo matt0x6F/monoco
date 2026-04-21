@@ -222,6 +222,24 @@ func TestCLI_taskOverrideFromManifest(t *testing.T) {
 	}
 }
 
+func TestCLI_taskPassthroughArgs(t *testing.T) {
+	bin := buildCLI(t)
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	// Override `test` with echo so the passthrough args land in stdout
+	// verbatim. Verifies that `--` args append to a manifest-overridden
+	// base command (the code path is unified with the default-command case).
+	manifest := "version: 1\ntasks:\n  test:\n    command: [\"/bin/echo\", \"BASE\"]\n"
+	if err := os.WriteFile(filepath.Join(fx.Root, "monoco.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := runCLI(t, bin, fx.Root, "test", "--all", "--", "MARKER_PASSTHROUGH", "-count=1")
+	if !strings.Contains(out, "BASE MARKER_PASSTHROUGH -count=1") {
+		t.Errorf("passthrough args not appended; output:\n%s", out)
+	}
+}
+
 func buildCLI(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
