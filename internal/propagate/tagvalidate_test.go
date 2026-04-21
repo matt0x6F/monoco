@@ -40,7 +40,8 @@ func TestValidateTrainTag(t *testing.T) {
 		{"release/2026-04-21-feat", false},
 		{"train/20260421-release", false},
 		{"train/2026-04-21-", false},
-		{"train/2026-04-21-HASUPPER", false},
+		{"train/2026-04-21-HASUPPER", true},
+		{"train/2026-04-21-20260421T155118-1a9cf4", true},
 		{"train/2026-04-21-with space", false},
 	}
 	for _, tc := range cases {
