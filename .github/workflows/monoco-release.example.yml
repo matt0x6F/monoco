@@ -1,0 +1,99 @@
+# Reference workflow for using monoco in CI.
+#
+# Copy this file to `.github/workflows/monoco-release.yml` in your own
+# repo (drop the `.example` suffix) and tweak as needed.
+#
+# Two jobs:
+#   - plan:  runs on pull_request. Runs `go test` across the affected
+#            module set and posts a `monoco release --dry-run` preview
+#            as a sticky PR comment.
+#   - apply: runs on push to main. Cuts the release and pushes tags
+#            atomically via `monoco release -y`.
+#
+# Assumptions:
+#   - Default GITHUB_TOKEN is allowed to push commits and tags to main.
+#     If branch protection blocks this, create a PAT (or GitHub App
+#     token) with `contents: write` and wire it into the `apply` job's
+#     checkout step as `token:` plus the git push.
+#   - Branch protection requires the `plan` job before merge (so the
+#     preview can't be skipped).
+#   - You're okay running `monoco release` on every push to main. If
+#     you want manual release cuts, move the `apply` job to a
+#     `workflow_dispatch` trigger instead.
+#   - For stricter supply-chain posture, re-pin each `uses:` to a full
+#     commit SHA (the versioned tags below are convenient for an
+#     example but mutable).
+
+name: monoco-release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # monoco's --since needs full history to diff against the base.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Install monoco
+        run: go install github.com/matt0x6f/monoco/cmd/monoco@latest
+
+      - name: Test affected modules
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: monoco test --since "origin/${BASE_REF}"
+
+      - name: Generate release plan
+        run: |
+          {
+            echo '```'
+            monoco release --dry-run
+            echo '```'
+          } > plan.md
+
+      - name: Post plan as PR comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: monoco-release-plan
+          path: plan.md
+
+  apply:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to push the release commit and per-module + train tags.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Install monoco
+        run: go install github.com/matt0x6f/monoco/cmd/monoco@latest
+
+      - name: Configure git identity
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Release
+        run: monoco release -y --remote origin
