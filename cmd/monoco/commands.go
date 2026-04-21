@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/matt0x6f/monoco/internal/bump"
+	"github.com/matt0x6f/monoco/internal/config"
 	"github.com/matt0x6f/monoco/internal/propagate"
 	"github.com/matt0x6f/monoco/internal/release"
 	"github.com/matt0x6f/monoco/internal/workspace"
@@ -21,17 +22,29 @@ type bumpFlag struct {
 func (b *bumpFlag) String() string     { return strings.Join(b.entries, ",") }
 func (b *bumpFlag) Set(v string) error { b.entries = append(b.entries, v); return nil }
 
+// repeatableFlag is a minimal flag.Value for repeatable string flags.
+type repeatableFlag struct{ entries []string }
+
+func (r *repeatableFlag) String() string     { return strings.Join(r.entries, ",") }
+func (r *repeatableFlag) Set(v string) error { r.entries = append(r.entries, v); return nil }
+
 func cmdRelease(root string, args []string) {
 	fs := flag.NewFlagSet("release", flag.ExitOnError)
 	var bumps bumpFlag
 	fs.Var(&bumps, "bump", "<module>=<major|minor|patch|skip> (repeatable) — override the default patch bump")
+	var allowMajor repeatableFlag
+	fs.Var(&allowMajor, "allow-major", "<module> (repeatable) — permit this module to cross a major version boundary")
 	remote := fs.String("remote", "origin", "remote to push to; set to \"\" to skip push")
 	slug := fs.String("slug", "", "train-tag slug (default: current branch)")
 	dryRun := fs.Bool("dry-run", false, "print plan and exit")
 	assumeYes := fs.Bool("y", false, "skip the Proceed? confirmation")
 	fs.Parse(args)
 
-	ws, err := workspace.Load(root)
+	cfg, err := config.Load(root)
+	if err != nil {
+		fatal(err)
+	}
+	ws, err := workspace.LoadWithConfig(root, cfg)
 	if err != nil {
 		fatal(err)
 	}
@@ -39,11 +52,16 @@ func cmdRelease(root string, args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	allowMajorSet, err := resolveAllowMajor(ws, cfg.AllowMajorSet(), allowMajor.entries)
+	if err != nil {
+		fatal(err)
+	}
 
 	opts := release.Options{
-		Bumps:  bumpMap,
-		Slug:   *slug,
-		Remote: *remote,
+		Bumps:      bumpMap,
+		Slug:       *slug,
+		Remote:     *remote,
+		AllowMajor: allowMajorSet,
 	}
 
 	plan, err := release.Plan(ws, opts, os.Stdout)
@@ -80,6 +98,29 @@ func cmdRelease(root string, args []string) {
 	} else {
 		fmt.Println("Not pushed (remote unset or push skipped).")
 	}
+}
+
+// resolveAllowMajor unions CLI --allow-major entries with the manifest's
+// allow_major list, resolves each to its canonical module path, and
+// returns the set. An unknown entry is a hard error — typos should not
+// silently disable the boundary gate.
+func resolveAllowMajor(ws *workspace.Workspace, fromManifest map[string]struct{}, fromFlag []string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	for ref := range fromManifest {
+		mp, ok := propagate.ResolveModuleRef(ws, ref)
+		if !ok {
+			return nil, fmt.Errorf("allow_major %q: module not found in workspace", ref)
+		}
+		out[mp] = struct{}{}
+	}
+	for _, ref := range fromFlag {
+		mp, ok := propagate.ResolveModuleRef(ws, ref)
+		if !ok {
+			return nil, fmt.Errorf("--allow-major %q: module not found in workspace", ref)
+		}
+		out[mp] = struct{}{}
+	}
+	return out, nil
 }
 
 func parseBumpFlags(ws *workspace.Workspace, entries []string) (map[string]bump.Kind, error) {
