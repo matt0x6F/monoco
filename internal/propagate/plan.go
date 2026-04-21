@@ -418,7 +418,7 @@ func sanitizeSlug(s string) string {
 var moduleTagRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*/v\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$`)
 
 // trainTagRE matches train/<yyyy-mm-dd>-<slug>.
-var trainTagRE = regexp.MustCompile(`^train/\d{4}-\d{2}-\d{2}-[a-z0-9._-]+$`)
+var trainTagRE = regexp.MustCompile(`^train/\d{4}-\d{2}-\d{2}-[A-Za-z0-9._-]+$`)
 
 func validateModuleTag(name string) error {
 	if name == "" {
