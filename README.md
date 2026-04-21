@@ -50,6 +50,39 @@ monoco build --since origin/main
 monoco generate --since origin/main
 ```
 
+## Using monoco in CI
+
+monoco is a CLI, so CI calls it like any other Go binary. A reference
+workflow lives at [`.github/workflows/monoco-release.yml.example`](.github/workflows/monoco-release.yml.example)
+— copy it into your repo (drop the `.example`) and tweak.
+
+The workflow splits into two jobs that reflect the two places monoco runs:
+
+- **`plan` on `pull_request`** — `go install`s monoco, runs
+  `monoco test --since "origin/$BASE_REF"` to fail fast on affected
+  tests, then runs `monoco release --dry-run` and posts the output as a
+  sticky PR comment (so reviewers see the propagation plan without
+  running it locally).
+- **`apply` on `push` to `main`** — re-installs monoco and runs
+  `monoco release -y --remote origin`, which cuts the release commit,
+  tags every affected module, and atomically pushes.
+
+Gotchas worth flagging when you copy it:
+
+- `actions/checkout@v4` must use `fetch-depth: 0`. monoco's `--since`
+  needs real history; the default shallow clone silently drops modules
+  from the affected set.
+- `permissions:` differ per job. `plan` needs `contents: read` plus
+  `pull-requests: write` (for the comment). `apply` needs `contents: write`
+  (for the release commit and tags).
+- The default `GITHUB_TOKEN` can push to `main` and create tags in the
+  same repo. If branch protection blocks bot pushes, swap in a PAT or a
+  GitHub App token with `contents: write` on `actions/checkout` and
+  update the `apply` job accordingly.
+- Major-version bumps across the `/vN` boundary are refused today
+  (see [Conventions](#conventions)); the workflow won't rescue you from
+  that — `monoco release --dry-run` will just fail the `plan` job.
+
 ## Conventions
 
 - Modules discovered by scanning for `go.mod` files (excluding repo root, `vendor/`, and dotfiles).
