@@ -53,7 +53,7 @@ monoco generate --since origin/main
 ## Using monoco in CI
 
 monoco is a CLI, so CI calls it like any other Go binary. A reference
-workflow lives at [`.github/workflows/monoco-release.example.yml`](.github/workflows/monoco-release.example.yml)
+workflow lives at [`.github/workflows/monoco-release.yml.example`](.github/workflows/monoco-release.yml.example)
 — copy it into your repo (drop the `.example`) and tweak.
 
 The workflow splits into two jobs that reflect the two places monoco runs:
