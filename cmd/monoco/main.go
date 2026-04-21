@@ -230,6 +230,9 @@ func cmdTask(root string, args []string, taskName string, defaultCommand []strin
 	if override := cfg.TaskCommand(taskName); override != nil {
 		command = override
 	}
+	if extra := fs.Args(); len(extra) > 0 {
+		command = append(append([]string{}, command...), extra...)
+	}
 	ws, err := workspace.LoadWithConfig(root, cfg)
 	if err != nil {
 		fatal(err)
