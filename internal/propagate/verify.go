@@ -2,13 +2,16 @@ package propagate
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"github.com/matt0x6f/monoco/internal/workspace"
 	"golang.org/x/mod/modfile"
+	"golang.org/x/sync/errgroup"
 )
 
 // Verify runs a module-mode build of each named module with an alternate
@@ -16,21 +19,27 @@ import (
 // workspace require to its on-disk path. The real go.mod is not mutated;
 // the alt modfile + sum are removed on return.
 //
-// Returns the first build failure encountered.
-func Verify(ws *workspace.Workspace, modulePaths []string) error {
+// Modules are verified in parallel, bounded by runtime.NumCPU(). The first
+// build failure cancels ctx, killing in-flight `go build` subprocesses,
+// and is returned. Unlike internal/tasks.Run (which collects all results),
+// Verify is fail-fast because Apply rolls back on any verify failure and
+// later results would be discarded.
+func Verify(ctx context.Context, ws *workspace.Workspace, modulePaths []string) error {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(runtime.NumCPU())
 	for _, mp := range modulePaths {
 		mod, ok := ws.Modules[mp]
 		if !ok {
 			return fmt.Errorf("module %q not found in workspace", mp)
 		}
-		if err := verifyOne(mod.Dir, ws); err != nil {
-			return err
-		}
+		g.Go(func() error {
+			return verifyOne(gctx, mod.Dir, ws)
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
-func verifyOne(modDir string, ws *workspace.Workspace) error {
+func verifyOne(ctx context.Context, modDir string, ws *workspace.Workspace) error {
 	goModPath := filepath.Join(modDir, "go.mod")
 	orig, err := os.ReadFile(goModPath)
 	if err != nil {
@@ -75,7 +84,7 @@ func verifyOne(modDir string, ws *workspace.Workspace) error {
 	}
 	defer os.Remove(altSum)
 
-	cmd := exec.Command("go", "build", "-modfile=go.verify.mod", "./...")
+	cmd := exec.CommandContext(ctx, "go", "build", "-modfile=go.verify.mod", "./...")
 	cmd.Dir = modDir
 	cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=mod")
 	var stderr bytes.Buffer

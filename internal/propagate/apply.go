@@ -2,6 +2,7 @@ package propagate
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,12 @@ type ApplyResult struct {
 // working tree and refs are restored to the pre-run state. Push failures
 // leave the local commit and tags intact for retry.
 func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult, error) {
+	return ApplyContext(context.Background(), ws, plan, opts)
+}
+
+// ApplyContext is Apply with an explicit context. ctx is propagated into
+// Verify so its parallel `go build` subprocesses are killed on cancel.
+func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult, error) {
 	if len(plan.Entries) == 0 {
 		return nil, fmt.Errorf("empty plan")
 	}
@@ -85,7 +92,7 @@ func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult
 	for _, e := range plan.Entries {
 		paths = append(paths, targetPath(e))
 	}
-	if err := Verify(verifyWS, paths); err != nil {
+	if err := Verify(ctx, verifyWS, paths); err != nil {
 		rollback()
 		return nil, fmt.Errorf("verify: %w", err)
 	}
