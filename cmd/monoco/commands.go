@@ -64,7 +64,12 @@ func cmdRelease(root string, args []string) {
 		AllowMajor: allowMajorSet,
 	}
 
-	plan, err := release.Plan(ws, opts, os.Stdout)
+	// Dry-run is offline: don't ls-remote for a base SHA we won't use.
+	planOpts := opts
+	if *dryRun {
+		planOpts.Remote = ""
+	}
+	plan, err := release.Plan(ws, planOpts, os.Stdout)
 	if err != nil {
 		fatal(err)
 	}

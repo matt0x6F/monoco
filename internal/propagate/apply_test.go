@@ -233,6 +233,86 @@ func TestApply_bootstrapFromPlaceholders(t *testing.T) {
 	}
 }
 
+func TestApply_ConcurrentBaseMove(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+		},
+	})
+	run(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
+	run(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
+	run(t, fx.Root, "git", "push", "origin", "main", "--tags")
+
+	// Apply a storage change (simulates in-progress dev).
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
+		"package storage\n\nfunc StorageHello() string { return \"new\" }\nfunc Batch() string { return \"batch\" }\n")
+	run(t, fx.Root, "git", "add", "-A")
+	run(t, fx.Root, "git", "commit", "-m", "storage: add Batch")
+
+	// Capture the remote base SHA exactly as release.Plan would.
+	baseSHA, err := GetRemoteRefSHA(fx.Root, "origin", "refs/heads/main")
+	if err != nil {
+		t.Fatalf("GetRemoteRefSHA: %v", err)
+	}
+
+	ws, _ := workspace.Load(fx.Root)
+	plan, err := NewPlanForModules(ws, []string{"example.com/mono/storage"}, Options{
+		Slug:    "race",
+		Bumps:   map[string]bump.Kind{"example.com/mono/storage": bump.Minor},
+		BaseRef: "refs/heads/main",
+		BaseSHA: baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("NewPlanForModules: %v", err)
+	}
+
+	// Simulate a competing run: clone the bare remote, push an
+	// unrelated commit, which advances origin/main between plan and
+	// apply.
+	advanceRemoteMain(t, fx.RemoteDir)
+
+	_, err = Apply(ws, plan, ApplyOptions{Remote: "origin"})
+	if err == nil {
+		t.Fatal("Apply should have failed due to base SHA drift")
+	}
+	if !strings.Contains(err.Error(), "base moved") {
+		t.Fatalf("expected base-moved error, got: %v", err)
+	}
+
+	// No local tags should have been created for this run.
+	for _, tg := range []string{
+		"modules/storage/v0.2.0",
+		"modules/api/v0.1.1",
+		plan.TrainTag,
+	} {
+		if tagExists(t, fx.Root, tg) {
+			t.Errorf("tag %s should not exist after aborted apply", tg)
+		}
+	}
+	// No release commit either.
+	if n := countCommitsSince(t, fx.Root, baseSHA); n != 1 {
+		t.Errorf("expected 1 commit since base (the storage feat), got %d", n)
+	}
+}
+
+// advanceRemoteMain pushes an unrelated commit to the bare remote's
+// main branch from a fresh clone.
+func advanceRemoteMain(t *testing.T, remoteDir string) {
+	t.Helper()
+	other := t.TempDir()
+	run(t, other, "git", "clone", remoteDir, ".")
+	// Ensure a local `main` tracking origin/main exists regardless of
+	// the clone's HEAD handling across git versions.
+	run(t, other, "git", "checkout", "-B", "main", "origin/main")
+	run(t, other, "git", "config", "user.email", "concurrent@example.com")
+	run(t, other, "git", "config", "user.name", "Concurrent")
+	writeFile(t, filepath.Join(other, "concurrent.txt"), "raced\n")
+	run(t, other, "git", "add", "-A")
+	run(t, other, "git", "commit", "-m", "concurrent: race")
+	run(t, other, "git", "push", "origin", "main")
+}
+
 func TestApply_refusesDirtyWorkingTree(t *testing.T) {
 	fx := fixture.New(t, fixture.Spec{
 		Modules: []fixture.ModuleSpec{{Name: "storage"}},
