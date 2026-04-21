@@ -181,9 +181,6 @@ func discoverModules(root string) ([]string, error) {
 			return nil
 		}
 		dir := filepath.Dir(path)
-		if dir == root {
-			return nil
-		}
 		rel, err := filepath.Rel(root, dir)
 		if err != nil {
 			return err
@@ -198,6 +195,10 @@ func writeGoWork(root string, dirs []string) error {
 	var b strings.Builder
 	b.WriteString("go 1.22\n\nuse (\n")
 	for _, d := range dirs {
+		if d == "." {
+			b.WriteString("\t.\n")
+			continue
+		}
 		fmt.Fprintf(&b, "\t./%s\n", d)
 	}
 	b.WriteString(")\n")

@@ -174,6 +174,33 @@ func TestCLI_init_writesStubManifest(t *testing.T) {
 	}
 }
 
+func TestCLI_init_singleRootModule(t *testing.T) {
+	bin := buildCLI(t)
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.com/solo\n\ngo 1.22\n")
+	writeFile(t, filepath.Join(root, "solo.go"), "package solo\n\nfunc Hello() string { return \"hi\" }\n")
+	runT(t, root, "git", "init", "-q", "-b", "main")
+	runT(t, root, "git", "config", "user.email", "t@example.com")
+	runT(t, root, "git", "config", "user.name", "t")
+	runT(t, root, "git", "add", "-A")
+	runT(t, root, "git", "commit", "-q", "-m", "init")
+
+	runCLI(t, bin, root, "init")
+
+	workBytes, err := os.ReadFile(filepath.Join(root, "go.work"))
+	if err != nil {
+		t.Fatalf("read go.work: %v", err)
+	}
+	if !strings.Contains(string(workBytes), "\n\t.\n") {
+		t.Errorf("go.work missing root use entry; contents:\n%s", workBytes)
+	}
+
+	// Downstream command must load the workspace and see the root module.
+	out := runCLI(t, bin, root, "affected", "--since", "HEAD")
+	_ = out // an empty diff is fine; success == no "empty workspace" / "no such file" error
+}
+
 func TestCLI_excludedModuleIgnoredByAffected(t *testing.T) {
 	bin := buildCLI(t)
 	fx := fixture.New(t, fixture.Spec{
