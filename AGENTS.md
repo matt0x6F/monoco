@@ -55,6 +55,7 @@ Integration tests require `MONOCO_TEST_REPO_TOKEN` (a PAT with repo scope on the
 - Tag naming follows Go's nested-module convention: `<module-path>/vX.Y.Z` for modules, `train/<date>-<slug>` for release trains. Do not change these without a spec update.
 - Errors from the Go toolchain should propagate with context, not be reinterpreted or papered over.
 - Significant user-visible behavior changes should update [docs/architecture.md](docs/architecture.md) or [docs/release-model.md](docs/release-model.md) alongside the code.
+- `Verify` runs `go build` in module mode (`GOWORK=off`, `GOFLAGS=-mod=mod`) so it catches rewrites workspace mode hides; see [docs/release-model.md](docs/release-model.md).
 
 ## Out of scope
 

@@ -4,7 +4,7 @@ Go-native monorepo tooling: atomic, propagated releases across module boundaries
 
 **The problem it solves.** In a Go monorepo with modules `A → B → C` (A depends on B, B depends on C), shipping a change to C the native way takes three releases: tag C, bump B's `go.mod`, tag B, bump A's `go.mod`, tag A. Cross-module refactors are chicken-and-egg (A won't compile against new B until B is tagged; B won't compile against new C until C is tagged).
 
-**monoco's mental model.** A release is one atomic propagation of a change through the dependency graph. While working, you `replace` your in-flight modules locally so the whole workspace compiles. When you're ready, `monoco release` reads those `replace` directives as your declaration of "these are shipping," rewrites every downstream `go.mod` + `go.sum`, strips the local `replace` directives, verifies the whole thing compiles in module mode, tags every affected module, and pushes everything atomically. All tags point at a single release commit. External consumers see honest per-module semver.
+**monoco's mental model.** Releasing isn't a noun, it's a verb: *propagate a change through the dependency graph atomically*. While working, you `replace` your in-flight modules locally so the whole workspace compiles. When you're ready, `monoco release` reads those `replace` directives as your declaration of "these are shipping," rewrites every downstream `go.mod` + `go.sum`, strips the local `replace` directives, verifies the whole thing compiles in module mode, tags every affected module, and pushes everything atomically. All tags point at a single release commit. External consumers see honest per-module semver.
 
 **Where it fits.** Go's toolchain builds, tests, and versions modules. `go.work` handles local cross-module development. The gap is at release time, when a cross-module change needs to become a coherent set of tags in one step. That's what monoco does, and that's all it does. Delete it tomorrow and you still have a working Go monorepo: standard `go.mod`, standard `go.work`, standard tags. See [Why not X?](#why-not-x) for how that stacks up.
 
@@ -108,6 +108,8 @@ Every `release` is one atomic operation:
 8. `git push --atomic origin <branch> <tags...>` — all or nothing.
 
 If anything before the push fails, the working tree and refs are restored to their pre-run state. If the push fails, the local commit and tags are kept; rerun `release` after fixing the push condition.
+
+Step 6 runs `go build` with `GOWORK=off` and `GOFLAGS=-mod=mod` so the verify pass sees the same module graph `go get` consumers will see; see [docs/release-model.md](docs/release-model.md) for the rationale.
 
 ## Why not X?
 
