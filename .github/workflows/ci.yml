@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # monoco's --since needs full history to diff against the base.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -25,5 +28,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Unit tests
-        run: go test ./... -count=1 -race -timeout=5m
+      - name: Affected tests (PR)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: go run ./cmd/monoco test --since "origin/${BASE_REF}"
+      - name: All tests (push)
+        if: github.event_name != 'pull_request'
+        run: go run ./cmd/monoco test --all
