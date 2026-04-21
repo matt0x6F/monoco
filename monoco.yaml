@@ -1,0 +1,5 @@
+version: 1
+
+tasks:
+  test:
+    command: ["go", "test", "./...", "-count=1", "-race", "-timeout=5m"]
