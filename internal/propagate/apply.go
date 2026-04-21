@@ -3,13 +3,16 @@ package propagate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/matt0x6f/monoco/internal/gitx"
 	"github.com/matt0x6f/monoco/internal/propagate/importrewrite"
 	"github.com/matt0x6f/monoco/internal/workspace"
 	"golang.org/x/mod/modfile"
@@ -64,7 +67,7 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 	}
 
 	// Snapshot HEAD for rollback.
-	oldHeadOut, err := shellGit(ws.Root, "rev-parse", "HEAD")
+	oldHeadOut, err := gitx.Run(context.Background(), ws.Root, "rev-parse", "HEAD")
 	if err != nil {
 		return nil, err
 	}
@@ -72,37 +75,46 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 
 	// Track tags we create locally so we can roll them back.
 	var createdTags []string
-	rollback := func() {
+	rollback := func() error {
+		var errs []error
 		for _, t := range createdTags {
-			_, _ = shellGit(ws.Root, "tag", "-d", t)
+			if _, err := gitx.Run(context.Background(), ws.Root, "tag", "-d", t); err != nil {
+				log.Printf("rollback: delete tag %s: %v", t, err)
+				errs = append(errs, fmt.Errorf("delete tag %s: %w", t, err))
+			}
 		}
-		// reset --hard to oldHead: discards release commit and restores working tree.
-		_, _ = shellGit(ws.Root, "reset", "--hard", oldHead)
+		if _, err := gitx.Run(context.Background(), ws.Root, "reset", "--hard", oldHead); err != nil {
+			log.Printf("rollback: reset --hard %s: %v", oldHead, err)
+			errs = append(errs, fmt.Errorf("reset --hard %s: %w", oldHead, err))
+		}
+		return errors.Join(errs...)
+	}
+	failAndRollback := func(orig error) error {
+		if rerr := rollback(); rerr != nil {
+			return fmt.Errorf("%w; rollback also failed: %v", orig, rerr)
+		}
+		return orig
 	}
 
 	// 1. Rewrite go.mod + go.sum in topo order.
 	if err := rewriteGoMods(ws, plan); err != nil {
-		rollback()
-		return nil, fmt.Errorf("rewrite go.mods: %w", err)
+		return nil, failAndRollback(fmt.Errorf("rewrite go.mods: %w", err))
 	}
 
 	// 2. Create the release commit (only if rewrites actually changed
 	// anything on disk). Bootstrap releases of modules with no in-tree
 	// consumers produce zero go.mod rewrites, so there's nothing to
 	// commit — we tag the existing HEAD instead.
-	if _, err := shellGit(ws.Root, "add", "-A"); err != nil {
-		rollback()
-		return nil, err
+	if _, err := gitx.Run(context.Background(), ws.Root, "add", "-A"); err != nil {
+		return nil, failAndRollback(err)
 	}
 	hasStaged, err := hasStagedChanges(ws.Root)
 	if err != nil {
-		rollback()
-		return nil, err
+		return nil, failAndRollback(err)
 	}
 	if hasStaged {
-		if _, err := shellGit(ws.Root, "commit", "-m", plan.CommitMsg); err != nil {
-			rollback()
-			return nil, fmt.Errorf("create release commit: %w", err)
+		if _, err := gitx.Run(context.Background(), ws.Root, "commit", "-m", plan.CommitMsg); err != nil {
+			return nil, failAndRollback(fmt.Errorf("create release commit: %w", err))
 		}
 	}
 
@@ -110,22 +122,19 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 	// rewrite module paths (including any /vN majors) are visible.
 	verifyWS, err := workspace.Load(ws.Root)
 	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("reload workspace for verify: %w", err)
+		return nil, failAndRollback(fmt.Errorf("reload workspace for verify: %w", err))
 	}
 	paths := make([]string, 0, len(plan.Entries))
 	for _, e := range plan.Entries {
 		paths = append(paths, targetPath(e))
 	}
 	if err := Verify(ctx, verifyWS, paths); err != nil {
-		rollback()
-		return nil, fmt.Errorf("verify: %w", err)
+		return nil, failAndRollback(fmt.Errorf("verify: %w", err))
 	}
 
-	releaseSHAOut, err := shellGit(ws.Root, "rev-parse", "HEAD")
+	releaseSHAOut, err := gitx.Run(context.Background(), ws.Root, "rev-parse", "HEAD")
 	if err != nil {
-		rollback()
-		return nil, err
+		return nil, failAndRollback(err)
 	}
 	releaseSHA := trim(releaseSHAOut)
 
@@ -135,16 +144,14 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 			createdTags = append(createdTags, e.TagName)
 			continue
 		}
-		if _, err := shellGit(ws.Root, "tag", e.TagName, releaseSHA); err != nil {
-			rollback()
-			return nil, fmt.Errorf("tag %s: %w", e.TagName, err)
+		if _, err := gitx.Run(context.Background(), ws.Root, "tag", e.TagName, releaseSHA); err != nil {
+			return nil, failAndRollback(fmt.Errorf("tag %s: %w", e.TagName, err))
 		}
 		createdTags = append(createdTags, e.TagName)
 	}
 	if !tagAlreadyAt(ws.Root, plan.TrainTag, releaseSHA) {
-		if _, err := shellGit(ws.Root, "tag", plan.TrainTag, releaseSHA); err != nil {
-			rollback()
-			return nil, fmt.Errorf("tag %s: %w", plan.TrainTag, err)
+		if _, err := gitx.Run(context.Background(), ws.Root, "tag", plan.TrainTag, releaseSHA); err != nil {
+			return nil, failAndRollback(fmt.Errorf("tag %s: %w", plan.TrainTag, err))
 		}
 	}
 	createdTags = append(createdTags, plan.TrainTag)
@@ -433,7 +440,7 @@ func mergeGoSum(goSumPath string, adds []string) error {
 }
 
 func requireCleanWorkingTree(root string) error {
-	out, err := shellGit(root, "status", "--porcelain")
+	out, err := gitx.Run(context.Background(), root, "status", "--porcelain")
 	if err != nil {
 		return fmt.Errorf("git status: %w", err)
 	}
@@ -457,7 +464,7 @@ func atomicPush(root, remote, branch string, tags []string, leaseSHA string) err
 	}
 
 	if leaseSHA == "" {
-		_, err := shellGit(root, build(false)...)
+		_, err := gitx.Run(context.Background(), root, build(false)...)
 		return err
 	}
 
@@ -466,14 +473,14 @@ func atomicPush(root, remote, branch string, tags []string, leaseSHA string) err
 	// to a plain atomic push: a non-fast-forward would still be
 	// rejected, and the preflight SHA check already caught the common
 	// race. The fallback keeps monoco usable on strict GitHub orgs.
-	_, err := shellGit(root, build(true)...)
+	_, err := gitx.Run(context.Background(), root, build(true)...)
 	if err == nil {
 		return nil
 	}
 	if !isProtectedBranchLeaseReject(err) {
 		return err
 	}
-	_, err2 := shellGit(root, build(false)...)
+	_, err2 := gitx.Run(context.Background(), root, build(false)...)
 	return err2
 }
 
@@ -512,7 +519,7 @@ func hasStagedChanges(root string) (bool, error) {
 }
 
 func tagAlreadyAt(root, tag, sha string) bool {
-	existing, err := shellGit(root, "rev-list", "-n", "1", tag)
+	existing, err := gitx.Run(context.Background(), root, "rev-list", "-n", "1", tag)
 	if err != nil {
 		return false
 	}

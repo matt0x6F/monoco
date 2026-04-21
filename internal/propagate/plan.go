@@ -3,17 +3,18 @@
 package propagate
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/matt0x6f/monoco/internal/bump"
 	"github.com/matt0x6f/monoco/internal/gitgraph"
+	"github.com/matt0x6f/monoco/internal/gitx"
 	"github.com/matt0x6f/monoco/internal/workspace"
 	"golang.org/x/mod/semver"
 )
@@ -224,13 +225,17 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		mod := ws.Modules[modPath]
 		_, isDirect := directSet[modPath]
 		rel := normalizeRelDir(mod.RelDir)
+		tag := rel + "/" + versions[modPath]
+		if err := validateModuleTag(tag); err != nil {
+			return nil, fmt.Errorf("module %s: %w", modPath, err)
+		}
 		entries = append(entries, Entry{
 			ModulePath:   modPath,
 			RelDir:       rel,
 			OldVersion:   oldVersions[modPath],
 			NewVersion:   versions[modPath],
 			Kind:         bumps[modPath],
-			TagName:      rel + "/" + versions[modPath],
+			TagName:      tag,
 			DirectChange: isDirect,
 			MajorBump:    majorBumps[modPath],
 		})
@@ -249,6 +254,9 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		slug = "release"
 	}
 	train := fmt.Sprintf("train/%s-%s", now.Format("2006-01-02"), slug)
+	if err := validateTrainTag(train); err != nil {
+		return nil, err
+	}
 
 	return &Plan{
 		Root:      ws.Root,
@@ -351,7 +359,7 @@ func CurrentBranch(root string) (string, error) {
 }
 
 func currentBranch(root string) (string, error) {
-	out, err := shellGit(root, "symbolic-ref", "--short", "HEAD")
+	out, err := gitx.Run(context.Background(), root, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -366,7 +374,7 @@ var ErrNoRemoteRef = errors.New("remote has no such ref")
 // ref is a full ref (e.g. "refs/heads/main"). Returns ErrNoRemoteRef if
 // the remote reachable but has no such ref.
 func GetRemoteRefSHA(root, remote, ref string) (string, error) {
-	out, err := shellGit(root, "ls-remote", remote, ref)
+	out, err := gitx.Run(context.Background(), root, "ls-remote", remote, ref)
 	if err != nil {
 		return "", err
 	}
@@ -402,19 +410,38 @@ func sanitizeSlug(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+// moduleTagRE matches monoco's per-module tag format: a relative module
+// path (Go-identifier-friendly, slash-separated) joined to a strict
+// semver via "/vX.Y.Z" with optional pre-release metadata. It
+// intentionally rejects "+build" metadata (monoco never emits it),
+// traversal sequences, whitespace, and control runes.
+var moduleTagRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*/v\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$`)
+
+// trainTagRE matches train/<yyyy-mm-dd>-<slug>.
+var trainTagRE = regexp.MustCompile(`^train/\d{4}-\d{2}-\d{2}-[a-z0-9._-]+$`)
+
+func validateModuleTag(name string) error {
+	if name == "" {
+		return fmt.Errorf("module tag is empty")
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("module tag %q contains traversal sequence", name)
+	}
+	if !moduleTagRE.MatchString(name) {
+		return fmt.Errorf("module tag %q is not <modulepath>/vX.Y.Z[-pre]", name)
+	}
+	return nil
+}
+
+func validateTrainTag(name string) error {
+	if !trainTagRE.MatchString(name) {
+		return fmt.Errorf("train tag %q is not train/YYYY-MM-DD-<slug>", name)
+	}
+	return nil
+}
+
 func normalizeRelDir(p string) string {
 	p = filepath.ToSlash(filepath.Clean(p))
 	p = strings.TrimPrefix(p, "./")
 	return p
-}
-
-func shellGit(root string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %v: %w: %s", args, err, stderr.String())
-	}
-	return stdout.String(), nil
 }
