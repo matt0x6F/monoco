@@ -125,6 +125,71 @@ func TestPlan_noAffectedReturnsNil(t *testing.T) {
 	}
 }
 
+// TestPlan_bumpAddsDirectWithoutReplace covers the "publish a library
+// that nothing in-tree consumes" path: no replace directive points at
+// the module, but the user asked for it explicitly via --bump. The
+// module should be treated as direct-affected.
+func TestPlan_bumpAddsDirectWithoutReplace(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	gitRun(t, fx.Root, "tag", "modules/storage/v0.1.0")
+	ws, err := workspace.Load(fx.Root)
+	if err != nil {
+		t.Fatalf("workspace.Load: %v", err)
+	}
+
+	var out bytes.Buffer
+	plan, err := Plan(ws, Options{
+		Slug:  "test",
+		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Minor},
+	}, &out)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan == nil {
+		t.Fatalf("expected plan; got nil. stdout: %s", out.String())
+	}
+	var found bool
+	for _, e := range plan.Entries {
+		if e.ModulePath == "example.com/mono/storage" {
+			found = true
+			if e.NewVersion != "v0.2.0" {
+				t.Errorf("storage NewVersion = %s, want v0.2.0", e.NewVersion)
+			}
+			if e.Kind != bump.Minor {
+				t.Errorf("storage Kind = %v, want Minor", e.Kind)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("storage missing from plan entries: %+v", plan.Entries)
+	}
+}
+
+// TestPlan_skipBumpDoesNotAddDirect ensures that --bump foo=skip on a
+// module with no replace does NOT add it to the direct set (Skip means
+// "don't release", not "add and then skip").
+func TestPlan_skipBumpDoesNotAddDirect(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	gitRun(t, fx.Root, "tag", "modules/storage/v0.1.0")
+	ws, _ := workspace.Load(fx.Root)
+
+	var out bytes.Buffer
+	plan, err := Plan(ws, Options{
+		Slug:  "test",
+		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Skip},
+	}, &out)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan != nil {
+		t.Errorf("expected nil plan (skip of lone module = nothing to release); got %+v", plan)
+	}
+}
+
 func TestConfirmProceed(t *testing.T) {
 	cases := map[string]bool{
 		"y\n":   true,

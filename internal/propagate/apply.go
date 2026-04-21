@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -85,14 +86,24 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 		return nil, fmt.Errorf("rewrite go.mods: %w", err)
 	}
 
-	// 2. Create the release commit.
+	// 2. Create the release commit (only if rewrites actually changed
+	// anything on disk). Bootstrap releases of modules with no in-tree
+	// consumers produce zero go.mod rewrites, so there's nothing to
+	// commit — we tag the existing HEAD instead.
 	if _, err := shellGit(ws.Root, "add", "-A"); err != nil {
 		rollback()
 		return nil, err
 	}
-	if _, err := shellGit(ws.Root, "commit", "-m", plan.CommitMsg); err != nil {
+	hasStaged, err := hasStagedChanges(ws.Root)
+	if err != nil {
 		rollback()
-		return nil, fmt.Errorf("create release commit: %w", err)
+		return nil, err
+	}
+	if hasStaged {
+		if _, err := shellGit(ws.Root, "commit", "-m", plan.CommitMsg); err != nil {
+			rollback()
+			return nil, fmt.Errorf("create release commit: %w", err)
+		}
 	}
 
 	// 3. Verify module-mode build. Reload the workspace so the post-
@@ -483,6 +494,21 @@ func isProtectedBranchLeaseReject(err error) bool {
 		return true
 	}
 	return false
+}
+
+// hasStagedChanges reports whether `git add -A` left anything staged.
+// `git diff --cached --quiet` exits 0 when the index matches HEAD, 1
+// when it differs.
+func hasStagedChanges(root string) (bool, error) {
+	cmd := exec.Command("git", "-C", root, "diff", "--cached", "--quiet")
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, fmt.Errorf("git diff --cached: %w", err)
 }
 
 func tagAlreadyAt(root, tag, sha string) bool {

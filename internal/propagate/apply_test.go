@@ -233,6 +233,59 @@ func TestApply_bootstrapFromPlaceholders(t *testing.T) {
 	}
 }
 
+// TestApply_loneModuleSkipsReleaseCommit covers the bootstrap case
+// where a module has no in-tree consumers: there are no go.mod
+// rewrites to stage, so no release commit is created. The module tag
+// and train tag must land on the existing HEAD.
+func TestApply_loneModuleSkipsReleaseCommit(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	run(t, fx.Root, "git", "push", "origin", "main")
+
+	headBefore := headSHA(t, fx.Root)
+
+	ws, _ := workspace.Load(fx.Root)
+	plan, err := NewPlanForModules(ws, []string{"example.com/mono/storage"}, Options{
+		Slug:  "lone",
+		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Minor},
+	})
+	if err != nil {
+		t.Fatalf("NewPlanForModules: %v", err)
+	}
+
+	res, err := Apply(ws, plan, ApplyOptions{Remote: "origin"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	headAfter := headSHA(t, fx.Root)
+	if headAfter != headBefore {
+		t.Errorf("HEAD advanced (%s -> %s); expected no release commit for lone module",
+			headBefore, headAfter)
+	}
+	if res.ReleaseCommit != headBefore {
+		t.Errorf("ReleaseCommit = %s; want pre-apply HEAD %s", res.ReleaseCommit, headBefore)
+	}
+
+	for _, tg := range []string{"modules/storage/v0.1.0", plan.TrainTag} {
+		if !tagExists(t, fx.Root, tg) {
+			t.Errorf("missing local tag %s", tg)
+			continue
+		}
+		if got := tagSHA(t, fx.Root, tg); got != headBefore {
+			t.Errorf("tag %s points at %s, not HEAD %s", tg, got, headBefore)
+		}
+	}
+
+	remoteTags := remoteTagList(t, fx.RemoteDir)
+	for _, tg := range []string{"modules/storage/v0.1.0", plan.TrainTag} {
+		if !sliceContains(remoteTags, tg) {
+			t.Errorf("remote missing %s; has %v", tg, remoteTags)
+		}
+	}
+}
+
 func TestApply_ConcurrentBaseMove(t *testing.T) {
 	fx := fixture.New(t, fixture.Spec{
 		Modules: []fixture.ModuleSpec{

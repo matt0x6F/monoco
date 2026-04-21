@@ -4,6 +4,7 @@ package propagate
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -357,9 +358,13 @@ func currentBranch(root string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// ErrNoRemoteRef is returned by GetRemoteRefSHA when the remote exists
+// but has no such ref (e.g. the branch hasn't been pushed yet).
+var ErrNoRemoteRef = errors.New("remote has no such ref")
+
 // GetRemoteRefSHA returns the SHA of ref on remote via `git ls-remote`.
-// ref is a full ref (e.g. "refs/heads/main"). Returns an error if the
-// remote has no such ref.
+// ref is a full ref (e.g. "refs/heads/main"). Returns ErrNoRemoteRef if
+// the remote reachable but has no such ref.
 func GetRemoteRefSHA(root, remote, ref string) (string, error) {
 	out, err := shellGit(root, "ls-remote", remote, ref)
 	if err != nil {
@@ -367,7 +372,7 @@ func GetRemoteRefSHA(root, remote, ref string) (string, error) {
 	}
 	line := strings.TrimSpace(out)
 	if line == "" {
-		return "", fmt.Errorf("remote %q has no ref %q", remote, ref)
+		return "", fmt.Errorf("%w: %s %s", ErrNoRemoteRef, remote, ref)
 	}
 	// First line, first column.
 	if nl := strings.IndexByte(line, '\n'); nl >= 0 {

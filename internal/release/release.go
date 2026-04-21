@@ -5,6 +5,7 @@
 package release
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -39,12 +40,42 @@ type Options struct {
 // override via opts.Bumps), builds the propagation plan, and writes it
 // to stdout. A nil plan with nil error means "nothing to release."
 func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.Plan, error) {
-	directs, err := propagate.DirectFromReplaces(ws)
+	replaceDirects, err := propagate.DirectFromReplaces(ws)
 	if err != nil {
 		return nil, fmt.Errorf("detect affected modules: %w", err)
 	}
+
+	// The direct set is the union of two sources:
+	//   1. Modules with incoming workspace-local `replace` directives
+	//      (auto-detected — some in-tree consumer is exercising this
+	//      module's latest code, so a release propagates the cascade).
+	//   2. Modules explicitly named via `--bump <module>=<kind>` with a
+	//      non-Skip kind (user intent to release, even if no in-tree
+	//      consumer exists — e.g. a library published for external use).
+	// This keeps "derive don't declare" as the default while matching
+	// Go's reality that a module is releasable regardless of whether
+	// anything in the same repo happens to depend on it.
+	seen := map[string]bool{}
+	directs := make([]string, 0, len(replaceDirects))
+	for _, d := range replaceDirects {
+		if !seen[d] {
+			seen[d] = true
+			directs = append(directs, d)
+		}
+	}
+	for mp, k := range opts.Bumps {
+		if k == bump.Skip || k == bump.None {
+			continue
+		}
+		if !seen[mp] {
+			seen[mp] = true
+			directs = append(directs, mp)
+		}
+	}
+	sort.Strings(directs)
+
 	if len(directs) == 0 {
-		fmt.Fprintln(stdout, "no modules have workspace-local `replace` directives; nothing to release.")
+		fmt.Fprintln(stdout, "no modules have workspace-local `replace` directives and no `--bump` overrides; nothing to release.")
 		return nil, nil
 	}
 
@@ -76,11 +107,19 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 		}
 		ref := "refs/heads/" + branch
 		sha, err := propagate.GetRemoteRefSHA(ws.Root, opts.Remote, ref)
-		if err != nil {
+		switch {
+		case errors.Is(err, propagate.ErrNoRemoteRef):
+			// Fresh branch not yet on remote — no base to race with.
+			// Apply will push normally (no lease) and git's own non-ff
+			// rejection still blocks the race if someone creates the
+			// branch in the meantime.
+			popts.BaseRef = ref
+		case err != nil:
 			return nil, fmt.Errorf("read %s %s: %w", opts.Remote, ref, err)
+		default:
+			popts.BaseRef = ref
+			popts.BaseSHA = sha
 		}
-		popts.BaseRef = ref
-		popts.BaseSHA = sha
 	}
 
 	plan, err := propagate.NewPlanForModules(ws, directs, popts)
