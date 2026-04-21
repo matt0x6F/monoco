@@ -47,10 +47,42 @@ const (
 // buildOnce caches the compiled monoco binary across tests in the same
 // `go test` invocation. Build costs ~2s; with 7 scenarios that matters.
 var (
-	buildOnce   sync.Once
-	builtBin    string
-	buildErr    error
+	buildOnce sync.Once
+	builtBin  string
+	buildErr  error
 )
+
+// authHome caches a process-scoped HOME directory containing a .netrc
+// with the token. Every git/go invocation in this package points HOME at
+// this dir so the token flows through git's native credential path
+// instead of being embedded in the clone URL.
+var (
+	authHomeOnce sync.Once
+	authHomeDir  string
+	authHomeErr  error
+)
+
+func netrcAuthHome() (string, error) {
+	authHomeOnce.Do(func() {
+		token := os.Getenv("MONOCO_TEST_REPO_TOKEN")
+		if token == "" {
+			return
+		}
+		dir, err := os.MkdirTemp("", "monoco-auth-home-")
+		if err != nil {
+			authHomeErr = err
+			return
+		}
+		netrc := "machine github.com login x-access-token password " + token + "\n"
+		netrcPath := filepath.Join(dir, ".netrc")
+		if err := os.WriteFile(netrcPath, []byte(netrc), 0o600); err != nil {
+			authHomeErr = err
+			return
+		}
+		authHomeDir = dir
+	})
+	return authHomeDir, authHomeErr
+}
 
 type harness struct {
 	t        *testing.T
@@ -146,17 +178,13 @@ func snapshotRemoteTags(t *testing.T, wt string) map[string]string {
 	return m
 }
 
-// chooseCloneURL returns (url, human-readable note). Prefers HTTPS+token;
-// falls back to SSH URL for local dev.
+// chooseCloneURL returns (url, human-readable note). Prefers HTTPS when
+// MONOCO_TEST_REPO_TOKEN is set (auth flows via a .netrc under a test-
+// scoped HOME — never embedded in the URL); falls back to SSH otherwise.
 func chooseCloneURL() (string, string) {
-	token := os.Getenv("MONOCO_TEST_REPO_TOKEN")
-	if token != "" {
+	if os.Getenv("MONOCO_TEST_REPO_TOKEN") != "" {
 		base := envOr("MONOCO_TEST_REPO_HTTPS", defaultRepoHTTPS)
-		// Bake the token into the clone URL. Because the URL lives
-		// only in the workspace's .git/config inside t.TempDir(), it
-		// is cleaned up automatically when the test ends.
-		withAuth := strings.Replace(base, "https://", "https://x-access-token:"+token+"@", 1)
-		return withAuth, "HTTPS with MONOCO_TEST_REPO_TOKEN"
+		return base, "HTTPS with MONOCO_TEST_REPO_TOKEN (via .netrc)"
 	}
 	ssh := envOr("MONOCO_TEST_REPO_SSH", defaultRepoSSH)
 	return ssh, "SSH (" + ssh + ") — no token provided"
@@ -462,22 +490,33 @@ func runIDNow(t *testing.T) string {
 func todayUTC() string { return time.Now().UTC().Format("2006-01-02") }
 
 // sanitizedEnv strips any git/auth env vars from the parent process
-// that could interfere with our controlled token handling. We do NOT
-// strip GOPATH/GOCACHE because the test binary needs them.
+// that could interfere with our controlled token handling and, when a
+// token is configured, points HOME at a scratch dir holding only a
+// .netrc for github.com. This keeps the token out of clone URLs and
+// out of the working-tree's .git/config.
 func sanitizedEnv() []string {
+	token := os.Getenv("MONOCO_TEST_REPO_TOKEN")
 	var out []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "GIT_ASKPASS=") || strings.HasPrefix(kv, "SSH_AUTH_SOCK=") {
-			// Keep SSH_AUTH_SOCK when we don't have a token — SSH
-			// fallback path needs it. Strip GIT_ASKPASS always.
-			if strings.HasPrefix(kv, "GIT_ASKPASS=") {
-				continue
-			}
-			if os.Getenv("MONOCO_TEST_REPO_TOKEN") != "" {
-				continue
-			}
+		if strings.HasPrefix(kv, "HOME=") && token != "" {
+			continue
+		}
+		if strings.HasPrefix(kv, "GIT_CONFIG_GLOBAL=") && token != "" {
+			continue
+		}
+		if strings.HasPrefix(kv, "GIT_ASKPASS=") {
+			continue
+		}
+		if strings.HasPrefix(kv, "SSH_AUTH_SOCK=") && token != "" {
+			continue
 		}
 		out = append(out, kv)
+	}
+	if token != "" {
+		home, err := netrcAuthHome()
+		if err == nil && home != "" {
+			out = append(out, "HOME="+home, "GIT_CONFIG_GLOBAL=/dev/null")
+		}
 	}
 	return out
 }
