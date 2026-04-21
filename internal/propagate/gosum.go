@@ -19,7 +19,7 @@ type ModuleHashes struct {
 
 // ComputeModuleHashes produces the canonical h1: hashes for a module
 // rooted at modDir, as if it had been tagged as modPath@version.
-// Validated in pocs/04-release-gosum.
+// Validated by POC-4; see docs/poc-findings.md.
 func ComputeModuleHashes(modDir, modPath, version string) (ModuleHashes, error) {
 	tmp, err := os.CreateTemp("", "monoco-modzip-*.zip")
 	if err != nil {
