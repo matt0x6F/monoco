@@ -34,6 +34,12 @@ type Options struct {
 	// path (the form in go.mod's `module` line, without any `/vN`
 	// suffix). At most one module per plan may cross; see buildPlan.
 	AllowMajor map[string]struct{}
+	// BaseRef is the remote ref the plan's commit will be pushed to
+	// (e.g. "refs/heads/main"). Empty when no push is intended.
+	BaseRef string
+	// BaseSHA is the SHA of BaseRef on the remote at plan time. Used by
+	// Apply to detect concurrent pushes. Empty when BaseRef is empty.
+	BaseSHA string
 }
 
 // Entry is one module's slice of a plan.
@@ -54,6 +60,13 @@ type Plan struct {
 	Entries   []Entry
 	TrainTag  string // train/<YYYY-MM-DD>-<slug>
 	CommitMsg string // "release: <TrainTag>"
+	// BaseRef is the remote ref the release will push to (e.g.
+	// "refs/heads/main"). Empty when no push is intended.
+	BaseRef string
+	// BaseSHA is the SHA of BaseRef on the remote captured at plan time.
+	// Apply re-checks this before any mutation to detect concurrent
+	// pushes; empty disables the check.
+	BaseSHA string
 }
 
 // NewPlanForModules computes a plan from an explicit directly-affected
@@ -241,6 +254,8 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		Entries:   entries,
 		TrainTag:  train,
 		CommitMsg: "release: " + train,
+		BaseRef:   opts.BaseRef,
+		BaseSHA:   opts.BaseSHA,
 	}, nil
 }
 
@@ -328,12 +343,41 @@ func topoOrder(ws *workspace.Workspace, modules []string) []string {
 	return out
 }
 
+// CurrentBranch returns the short name of the branch currently checked
+// out at root (e.g. "main"). Errors if HEAD is detached.
+func CurrentBranch(root string) (string, error) {
+	return currentBranch(root)
+}
+
 func currentBranch(root string) (string, error) {
 	out, err := shellGit(root, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// GetRemoteRefSHA returns the SHA of ref on remote via `git ls-remote`.
+// ref is a full ref (e.g. "refs/heads/main"). Returns an error if the
+// remote has no such ref.
+func GetRemoteRefSHA(root, remote, ref string) (string, error) {
+	out, err := shellGit(root, "ls-remote", remote, ref)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(out)
+	if line == "" {
+		return "", fmt.Errorf("remote %q has no ref %q", remote, ref)
+	}
+	// First line, first column.
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	tab := strings.IndexAny(line, " \t")
+	if tab < 0 {
+		return "", fmt.Errorf("unexpected ls-remote output: %q", line)
+	}
+	return strings.TrimSpace(line[:tab]), nil
 }
 
 func sanitizeSlug(s string) string {

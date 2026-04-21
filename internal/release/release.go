@@ -31,6 +31,8 @@ type Options struct {
 	// version boundary in this release. Typically unioned from the
 	// --allow-major CLI flag and monoco.yaml's allow_major entries.
 	AllowMajor map[string]struct{}
+	// Branch overrides the branch to push to; defaults to current.
+	Branch string
 }
 
 // Plan gathers affected modules, applies bump kinds (default patch,
@@ -57,11 +59,31 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 		}
 	}
 
-	plan, err := propagate.NewPlanForModules(ws, directs, propagate.Options{
+	popts := propagate.Options{
 		Slug:       opts.Slug,
 		Bumps:      bumps,
 		AllowMajor: opts.AllowMajor,
-	})
+	}
+	// Capture the remote branch SHA so Apply can detect concurrent
+	// pushes. Only meaningful when we intend to push.
+	if opts.Remote != "" {
+		branch := opts.Branch
+		if branch == "" {
+			branch, err = propagate.CurrentBranch(ws.Root)
+			if err != nil {
+				return nil, fmt.Errorf("detect branch: %w", err)
+			}
+		}
+		ref := "refs/heads/" + branch
+		sha, err := propagate.GetRemoteRefSHA(ws.Root, opts.Remote, ref)
+		if err != nil {
+			return nil, fmt.Errorf("read %s %s: %w", opts.Remote, ref, err)
+		}
+		popts.BaseRef = ref
+		popts.BaseSHA = sha
+	}
+
+	plan, err := propagate.NewPlanForModules(ws, directs, popts)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +98,10 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 // Apply executes the plan. Thin wrapper around propagate.Apply so the
 // CLI only imports `release`.
 func Apply(ws *workspace.Workspace, plan *propagate.Plan, opts Options) (*propagate.ApplyResult, error) {
-	return propagate.Apply(ws, plan, propagate.ApplyOptions{Remote: opts.Remote})
+	return propagate.Apply(ws, plan, propagate.ApplyOptions{
+		Remote: opts.Remote,
+		Branch: opts.Branch,
+	})
 }
 
 // CurrentVersions reports the latest tagged version per module path.

@@ -41,6 +41,20 @@ func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult
 		return nil, err
 	}
 
+	// Preflight: if the plan recorded a remote base SHA, re-check that
+	// the remote hasn't advanced. This is the cheap path that aborts
+	// BEFORE any rewrite/verify work; the lease on push (step 5) closes
+	// the residual TOCTOU window.
+	if plan.BaseSHA != "" && opts.Remote != "" {
+		cur, err := GetRemoteRefSHA(ws.Root, opts.Remote, plan.BaseRef)
+		if err != nil {
+			return nil, fmt.Errorf("recheck %s %s: %w", opts.Remote, plan.BaseRef, err)
+		}
+		if cur != plan.BaseSHA {
+			return nil, fmt.Errorf("base moved: %s %s was %s when plan was computed, now %s; re-run 'monoco propagate plan' and retry", opts.Remote, plan.BaseRef, plan.BaseSHA, cur)
+		}
+	}
+
 	// Snapshot HEAD for rollback.
 	oldHeadOut, err := shellGit(ws.Root, "rev-parse", "HEAD")
 	if err != nil {
@@ -131,7 +145,7 @@ func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult
 			return result, fmt.Errorf("detect branch: %w", err)
 		}
 	}
-	if err := atomicPush(ws.Root, opts.Remote, branch, createdTags); err != nil {
+	if err := atomicPush(ws.Root, opts.Remote, branch, createdTags, plan.BaseSHA); err != nil {
 		return result, fmt.Errorf("atomic push: %w", err)
 	}
 	result.Pushed = true
@@ -411,13 +425,57 @@ func requireCleanWorkingTree(root string) error {
 	return nil
 }
 
-func atomicPush(root, remote, branch string, tags []string) error {
-	args := []string{"push", "--atomic", remote, branch}
-	for _, t := range tags {
-		args = append(args, "refs/tags/"+t)
+func atomicPush(root, remote, branch string, tags []string, leaseSHA string) error {
+	build := func(withLease bool) []string {
+		args := []string{"push", "--atomic"}
+		if withLease && leaseSHA != "" {
+			args = append(args, "--force-with-lease="+branch+":"+leaseSHA)
+		}
+		args = append(args, remote, branch)
+		for _, t := range tags {
+			args = append(args, "refs/tags/"+t)
+		}
+		return args
 	}
-	_, err := shellGit(root, args...)
-	return err
+
+	if leaseSHA == "" {
+		_, err := shellGit(root, build(false)...)
+		return err
+	}
+
+	// Try with lease first. If the remote's branch-protection config
+	// rejects force-style pushes even when the lease holds, fall back
+	// to a plain atomic push: a non-fast-forward would still be
+	// rejected, and the preflight SHA check already caught the common
+	// race. The fallback keeps monoco usable on strict GitHub orgs.
+	_, err := shellGit(root, build(true)...)
+	if err == nil {
+		return nil
+	}
+	if !isProtectedBranchLeaseReject(err) {
+		return err
+	}
+	_, err2 := shellGit(root, build(false)...)
+	return err2
+}
+
+// isProtectedBranchLeaseReject reports whether a push failure looks
+// like a protected-branch rule blocking force-with-lease. We retry
+// without the lease in that case.
+func isProtectedBranchLeaseReject(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "protected branch hook declined"):
+		return true
+	case strings.Contains(msg, "cannot force-push to this protected branch"):
+		return true
+	case strings.Contains(msg, "force pushes are not allowed"):
+		return true
+	}
+	return false
 }
 
 func tagAlreadyAt(root, tag, sha string) bool {
