@@ -8,8 +8,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/matt0x6f/monoco/internal/propagate/importrewrite"
 	"github.com/matt0x6f/monoco/internal/workspace"
 	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/semver"
 )
 
 // ApplyOptions configures apply.
@@ -72,9 +74,18 @@ func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult
 		return nil, fmt.Errorf("create release commit: %w", err)
 	}
 
-	// 3. Verify module-mode build.
-	paths := plan.ModulePaths()
-	if err := Verify(ws, paths); err != nil {
+	// 3. Verify module-mode build. Reload the workspace so the post-
+	// rewrite module paths (including any /vN majors) are visible.
+	verifyWS, err := workspace.Load(ws.Root)
+	if err != nil {
+		rollback()
+		return nil, fmt.Errorf("reload workspace for verify: %w", err)
+	}
+	paths := make([]string, 0, len(plan.Entries))
+	for _, e := range plan.Entries {
+		paths = append(paths, targetPath(e))
+	}
+	if err := Verify(verifyWS, paths); err != nil {
 		rollback()
 		return nil, fmt.Errorf("verify: %w", err)
 	}
@@ -129,11 +140,23 @@ func Apply(ws *workspace.Workspace, plan *Plan, opts ApplyOptions) (*ApplyResult
 
 // RewrittenMod describes the proposed rewrite of a single module.
 type RewrittenMod struct {
-	GoModPath string            // absolute path to go.mod
-	Old       []byte            // current bytes on disk
-	New       []byte            // proposed bytes after applying the plan
-	SumAdds   []string          // lines to append to this module's go.sum (may be empty)
-	GoSumPath string            // absolute path to go.sum (valid iff SumAdds non-empty)
+	GoModPath    string                      // absolute path to go.mod
+	Old          []byte                      // current bytes on disk
+	New          []byte                      // proposed bytes after applying the plan
+	SumAdds      []string                    // lines to append to this module's go.sum (may be empty)
+	GoSumPath    string                      // absolute path to go.sum (valid iff SumAdds non-empty)
+	GoFileEdits  []importrewrite.FileChange  // .go source rewrites for major-version path migrations
+	SkippedFiles []importrewrite.SkippedFile // .go files the rewriter skipped (build-tag gated)
+}
+
+// targetPath returns the module path as it will appear after applying
+// the plan. Major-version bumps append a /vN suffix; other entries are
+// unchanged.
+func targetPath(e Entry) string {
+	if !e.MajorBump {
+		return e.ModulePath
+	}
+	return e.ModulePath + "/" + semver.Major(e.NewVersion)
 }
 
 // ComputeRewrites returns the proposed go.mod rewrites + go.sum additions
@@ -145,27 +168,41 @@ type RewrittenMod struct {
 // in the plan. go.sum entries are computed for every freshly-tagged
 // module that any downstream in the plan depends on.
 func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenMod, error) {
-	newVersions := map[string]string{}
+	newVersions := map[string]string{}   // keyed by pre-plan module path
+	newPaths := map[string]string{}      // old path -> /vN-suffixed path (major bumpers only)
+	targetVersion := map[string]string{} // post-plan path -> new version
+	var rewrites []importrewrite.Rewrite
 	for _, e := range plan.Entries {
 		newVersions[e.ModulePath] = e.NewVersion
+		target := targetPath(e)
+		targetVersion[target] = e.NewVersion
+		if target != e.ModulePath {
+			newPaths[e.ModulePath] = target
+			rewrites = append(rewrites, importrewrite.Rewrite{
+				OldPath: e.ModulePath,
+				NewPath: target,
+			})
+		}
 	}
 
-	// Precompute canonical h1: hashes for each released module. The
-	// hash is over the module's current workspace contents — which, at
-	// release time, IS what will get tagged (we tag HEAD after rewrite).
+	// Precompute canonical h1: hashes for each released module, keyed
+	// by the module's post-plan path (so entries generated from a
+	// /vN-rewritten go.mod line up).
 	hashes := map[string]ModuleHashes{}
 	for _, e := range plan.Entries {
 		dir := ws.Modules[e.ModulePath].Dir
-		h, err := ComputeModuleHashes(dir, e.ModulePath, e.NewVersion)
+		target := targetPath(e)
+		h, err := ComputeModuleHashes(dir, target, e.NewVersion)
 		if err != nil {
-			return nil, fmt.Errorf("hash %s@%s: %w", e.ModulePath, e.NewVersion, err)
+			return nil, fmt.Errorf("hash %s@%s: %w", target, e.NewVersion, err)
 		}
-		hashes[e.ModulePath] = h
+		hashes[target] = h
 	}
 
 	out := map[string]RewrittenMod{}
 	for _, e := range plan.Entries {
-		goModPath := filepath.Join(ws.Modules[e.ModulePath].Dir, "go.mod")
+		modDir := ws.Modules[e.ModulePath].Dir
+		goModPath := filepath.Join(modDir, "go.mod")
 		b, err := os.ReadFile(goModPath)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", goModPath, err)
@@ -176,23 +213,47 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 		}
 
 		modChanged := false
-		referencedDeps := map[string]struct{}{}
+		referencedDeps := map[string]struct{}{} // post-plan paths
 
-		// Bump require versions for in-plan deps.
-		for _, req := range mf.Require {
-			if newV, inPlan := newVersions[req.Mod.Path]; inPlan {
-				if err := mf.AddRequire(req.Mod.Path, newV); err != nil {
-					return nil, fmt.Errorf("update require %s: %w", req.Mod.Path, err)
-				}
-				referencedDeps[req.Mod.Path] = struct{}{}
-				modChanged = true
+		// Rewrite this module's own `module` directive when it's the
+		// major-bumper (adds the /vN suffix).
+		if e.MajorBump {
+			if err := mf.AddModuleStmt(newPaths[e.ModulePath]); err != nil {
+				return nil, fmt.Errorf("set module %s: %w", newPaths[e.ModulePath], err)
 			}
+			modChanged = true
+		}
+
+		// Plan require-line updates without mutating while iterating.
+		type reqChange struct{ oldPath, newPath, newVersion string }
+		var reqChanges []reqChange
+		for _, req := range mf.Require {
+			newV, inPlan := newVersions[req.Mod.Path]
+			if !inPlan {
+				continue
+			}
+			np := req.Mod.Path
+			if nm, ok := newPaths[req.Mod.Path]; ok {
+				np = nm
+			}
+			reqChanges = append(reqChanges, reqChange{req.Mod.Path, np, newV})
+		}
+		for _, c := range reqChanges {
+			if c.oldPath != c.newPath {
+				if err := mf.DropRequire(c.oldPath); err != nil {
+					return nil, fmt.Errorf("drop require %s: %w", c.oldPath, err)
+				}
+			}
+			if err := mf.AddRequire(c.newPath, c.newVersion); err != nil {
+				return nil, fmt.Errorf("add require %s: %w", c.newPath, err)
+			}
+			referencedDeps[c.newPath] = struct{}{}
+			modChanged = true
 		}
 
 		// Drop workspace-local replaces for in-plan deps. A replace is
 		// "workspace-local" iff its New.Version is empty (path replacement)
 		// and resolves to a workspace module's dir.
-		modDir := ws.Modules[e.ModulePath].Dir
 		for _, r := range mf.Replace {
 			if r.New.Version != "" {
 				continue
@@ -226,7 +287,7 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 		var sumAdds []string
 		for dep := range referencedDeps {
 			h := hashes[dep]
-			depV := newVersions[dep]
+			depV := targetVersion[dep]
 			sumAdds = append(sumAdds,
 				fmt.Sprintf("%s %s %s", dep, depV, h.H1),
 				fmt.Sprintf("%s %s/go.mod %s", dep, depV, h.H1Mod),
@@ -234,7 +295,22 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 		}
 		sort.Strings(sumAdds)
 
-		if !modChanged && len(sumAdds) == 0 {
+		// Rewrite any .go files whose imports reference a major-bumped
+		// module (affects this module iff any such bumper exists in
+		// the plan). Applied to every entry — including the bumper
+		// itself, which may import its own subpackages by full path.
+		var goEdits []importrewrite.FileChange
+		var skipped []importrewrite.SkippedFile
+		if len(rewrites) > 0 {
+			rep, rerr := importrewrite.RewriteConsumer(modDir, rewrites)
+			if rerr != nil {
+				return nil, fmt.Errorf("rewrite imports in %s: %w", modDir, rerr)
+			}
+			goEdits = rep.Changes
+			skipped = rep.SkippedFiles
+		}
+
+		if !modChanged && len(sumAdds) == 0 && len(goEdits) == 0 {
 			continue
 		}
 
@@ -244,7 +320,14 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 			return nil, fmt.Errorf("format %s: %w", goModPath, err)
 		}
 
-		r := RewrittenMod{GoModPath: goModPath, Old: b, New: formatted, SumAdds: sumAdds}
+		r := RewrittenMod{
+			GoModPath:    goModPath,
+			Old:          b,
+			New:          formatted,
+			SumAdds:      sumAdds,
+			GoFileEdits:  goEdits,
+			SkippedFiles: skipped,
+		}
 		if len(sumAdds) > 0 {
 			r.GoSumPath = filepath.Join(ws.Modules[e.ModulePath].Dir, "go.sum")
 		}
@@ -264,6 +347,11 @@ func rewriteGoMods(ws *workspace.Workspace, plan *Plan) error {
 		if !bytes.Equal(r.Old, r.New) {
 			if err := os.WriteFile(r.GoModPath, r.New, 0o644); err != nil {
 				return fmt.Errorf("write %s: %w", r.GoModPath, err)
+			}
+		}
+		for _, fc := range r.GoFileEdits {
+			if err := os.WriteFile(fc.Path, fc.New, 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", fc.Path, err)
 			}
 		}
 		if len(r.SumAdds) == 0 {

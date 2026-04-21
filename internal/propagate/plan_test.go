@@ -87,7 +87,7 @@ func TestNewPlanForModules_skipDropsModule(t *testing.T) {
 	}
 }
 
-func TestNewPlanForModules_rejectsMajorBumpV1ToV2(t *testing.T) {
+func TestNewPlanForModules_rejectsMajorBumpWithoutAllow(t *testing.T) {
 	fx := fixture.New(t, fixture.Spec{
 		Modules: []fixture.ModuleSpec{{Name: "storage"}},
 	})
@@ -99,7 +99,67 @@ func TestNewPlanForModules_rejectsMajorBumpV1ToV2(t *testing.T) {
 		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Major},
 	})
 	if err == nil {
-		t.Fatal("expected v1→v2 rejection")
+		t.Fatal("expected v1→v2 rejection without --allow-major")
+	}
+	if !strings.Contains(err.Error(), "--allow-major") {
+		t.Errorf("error should mention --allow-major, got: %v", err)
+	}
+}
+
+func TestNewPlanForModules_allowsMajorBumpWhenOptedIn(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	run(t, fx.Root, "git", "tag", "modules/storage/v1.0.0")
+	ws, _ := workspace.Load(fx.Root)
+
+	plan, err := NewPlanForModules(ws, []string{"example.com/mono/storage"}, Options{
+		Slug:       "test",
+		Bumps:      map[string]bump.Kind{"example.com/mono/storage": bump.Major},
+		AllowMajor: map[string]struct{}{"example.com/mono/storage": {}},
+	})
+	if err != nil {
+		t.Fatalf("NewPlanForModules: %v", err)
+	}
+	e := findEntry(plan, "example.com/mono/storage")
+	if e == nil || !e.MajorBump {
+		t.Fatalf("expected MajorBump=true, got: %+v", e)
+	}
+	if e.NewVersion != "v2.0.0" {
+		t.Errorf("expected v2.0.0, got %s", e.NewVersion)
+	}
+}
+
+func TestNewPlanForModules_rejectsMultipleMajorBumps(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "cache"},
+		},
+	})
+	run(t, fx.Root, "git", "tag", "modules/storage/v1.0.0")
+	run(t, fx.Root, "git", "tag", "modules/cache/v1.0.0")
+	ws, _ := workspace.Load(fx.Root)
+
+	_, err := NewPlanForModules(ws, []string{"example.com/mono/storage", "example.com/mono/cache"}, Options{
+		Slug: "test",
+		Bumps: map[string]bump.Kind{
+			"example.com/mono/storage": bump.Major,
+			"example.com/mono/cache":   bump.Major,
+		},
+		AllowMajor: map[string]struct{}{
+			"example.com/mono/storage": {},
+			"example.com/mono/cache":   {},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when two modules cross major in one plan")
+	}
+	if !strings.Contains(err.Error(), "at most one") {
+		t.Errorf("error should explain the limit, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "storage") || !strings.Contains(err.Error(), "cache") {
+		t.Errorf("error should name both modules, got: %v", err)
 	}
 }
 

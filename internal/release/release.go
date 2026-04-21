@@ -27,6 +27,10 @@ type Options struct {
 	Slug string
 	// Remote is the push target. "" skips push.
 	Remote string
+	// AllowMajor is the set of module paths permitted to cross a major
+	// version boundary in this release. Typically unioned from the
+	// --allow-major CLI flag and monoco.yaml's allow_major entries.
+	AllowMajor map[string]struct{}
 }
 
 // Plan gathers affected modules, applies bump kinds (default patch,
@@ -54,8 +58,9 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 	}
 
 	plan, err := propagate.NewPlanForModules(ws, directs, propagate.Options{
-		Slug:  opts.Slug,
-		Bumps: bumps,
+		Slug:       opts.Slug,
+		Bumps:      bumps,
+		AllowMajor: opts.AllowMajor,
 	})
 	if err != nil {
 		return nil, err

@@ -29,6 +29,11 @@ type Options struct {
 	// NOT need an entry. A Skip entry drops that module from the plan.
 	// A direct-affected module without an entry is a fail-closed error.
 	Bumps map[string]bump.Kind
+	// AllowMajor is the set of module paths permitted to cross a major
+	// version boundary in this plan. Keyed by the module's current
+	// path (the form in go.mod's `module` line, without any `/vN`
+	// suffix). At most one module per plan may cross; see buildPlan.
+	AllowMajor map[string]struct{}
 }
 
 // Entry is one module's slice of a plan.
@@ -40,6 +45,7 @@ type Entry struct {
 	Kind         bump.Kind // bump kind applied
 	TagName      string    // <RelDir>/<NewVersion>
 	DirectChange bool      // true if affected by a replace; false if cascaded
+	MajorBump    bool      // true if this entry crosses a major version boundary
 }
 
 // Plan is a deterministic propagation plan.
@@ -163,8 +169,12 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		return nil, fmt.Errorf("no bump specified for direct-affected module(s): %s", strings.Join(missing, ", "))
 	}
 
-	// Compute new versions. Reject v1→v2 crossings for monoco v1.
+	// Compute new versions. Major-boundary crossings are gated by
+	// opts.AllowMajor, and at most one per plan is permitted (keeps
+	// import-path rewrite scope bounded).
 	versions := map[string]string{}
+	majorBumps := map[string]bool{}
+	var majorBumpers []string
 	for modPath, kind := range bumps {
 		old := oldVersions[modPath]
 		newV, err := bump.NextVersion(old, kind)
@@ -172,9 +182,17 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 			return nil, fmt.Errorf("next version for %s: %w", modPath, err)
 		}
 		if old != "" && semver.Major(newV) != semver.Major(old) {
-			return nil, fmt.Errorf("module %s would cross major version boundary (%s → %s); v2+ path rewrites are not supported in monoco v1", modPath, old, newV)
+			if _, ok := opts.AllowMajor[modPath]; !ok {
+				return nil, fmt.Errorf("module %s would cross major version boundary (%s → %s); pass --allow-major %s or set allow_major in monoco.yaml", modPath, old, newV, modPath)
+			}
+			majorBumps[modPath] = true
+			majorBumpers = append(majorBumpers, modPath)
 		}
 		versions[modPath] = newV
+	}
+	if len(majorBumpers) > 1 {
+		sort.Strings(majorBumpers)
+		return nil, fmt.Errorf("at most one module per propagation may cross a major boundary; got: %s", strings.Join(majorBumpers, ", "))
 	}
 
 	// Filter skipped modules out of the module set, then topo-order.
@@ -200,6 +218,7 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 			Kind:         bumps[modPath],
 			TagName:      rel + "/" + versions[modPath],
 			DirectChange: isDirect,
+			MajorBump:    majorBumps[modPath],
 		})
 	}
 

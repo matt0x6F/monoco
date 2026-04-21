@@ -118,6 +118,38 @@ bogus: true
 	}
 }
 
+func TestLoad_parsesAllowMajor(t *testing.T) {
+	dir := writeManifest(t, `
+version: 1
+allow_major:
+  - example.com/acme/foo
+  - example.com/acme/bar
+`)
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	set := c.AllowMajorSet()
+	if _, ok := set["example.com/acme/foo"]; !ok {
+		t.Errorf("AllowMajorSet missing foo: %v", set)
+	}
+	if _, ok := set["example.com/acme/bar"]; !ok {
+		t.Errorf("AllowMajorSet missing bar: %v", set)
+	}
+}
+
+func TestLoad_rejectsEmptyAllowMajorEntry(t *testing.T) {
+	dir := writeManifest(t, `
+version: 1
+allow_major:
+  - ""
+`)
+	_, err := Load(dir)
+	if err == nil || !strings.Contains(err.Error(), "allow_major") {
+		t.Fatalf("want allow_major error, got %v", err)
+	}
+}
+
 func TestLoad_rejectsBadVersion(t *testing.T) {
 	dir := writeManifest(t, `version: 2`)
 	_, err := Load(dir)

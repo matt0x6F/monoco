@@ -37,6 +37,13 @@ type Config struct {
 	// Recognized names: test, lint, build, generate. Unknown names are
 	// rejected. Any task name not present keeps its built-in default.
 	Tasks map[string]Task `yaml:"tasks"`
+
+	// AllowMajor lists module paths (as they appear in `go.mod`'s
+	// `module` line, without any `/vN` suffix) that may cross a major
+	// version boundary in a propagation. Absent entries are still
+	// rejected with a clear error — this gate is intentionally
+	// opt-in per module.
+	AllowMajor []string `yaml:"allow_major"`
 }
 
 // Task is one task-command override.
@@ -90,6 +97,18 @@ func (c *Config) ExcludedSet() map[string]struct{} {
 	return out
 }
 
+// AllowMajorSet returns AllowMajor as a set for O(1) membership checks.
+func (c *Config) AllowMajorSet() map[string]struct{} {
+	if c == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(c.AllowMajor))
+	for _, m := range c.AllowMajor {
+		out[m] = struct{}{}
+	}
+	return out
+}
+
 // TaskCommand returns the configured command for task, or nil if the
 // manifest does not override it. Callers should use their built-in
 // default on nil.
@@ -117,6 +136,11 @@ func (c *Config) validate() error {
 		}
 		if strings.Contains(e, "..") {
 			return fmt.Errorf("exclude[%d] %q: must not contain `..`", i, e)
+		}
+	}
+	for i, m := range c.AllowMajor {
+		if strings.TrimSpace(m) == "" {
+			return fmt.Errorf("allow_major[%d]: empty entry", i)
 		}
 	}
 	for name, t := range c.Tasks {
