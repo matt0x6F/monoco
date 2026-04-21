@@ -3,7 +3,9 @@ package propagate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,18 +75,30 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 
 	// Track tags we create locally so we can roll them back.
 	var createdTags []string
-	rollback := func() {
+	rollback := func() error {
+		var errs []error
 		for _, t := range createdTags {
-			_, _ = gitx.Run(context.Background(), ws.Root, "tag", "-d", t)
+			if _, err := gitx.Run(context.Background(), ws.Root, "tag", "-d", t); err != nil {
+				log.Printf("rollback: delete tag %s: %v", t, err)
+				errs = append(errs, fmt.Errorf("delete tag %s: %w", t, err))
+			}
 		}
-		// reset --hard to oldHead: discards release commit and restores working tree.
-		_, _ = gitx.Run(context.Background(), ws.Root, "reset", "--hard", oldHead)
+		if _, err := gitx.Run(context.Background(), ws.Root, "reset", "--hard", oldHead); err != nil {
+			log.Printf("rollback: reset --hard %s: %v", oldHead, err)
+			errs = append(errs, fmt.Errorf("reset --hard %s: %w", oldHead, err))
+		}
+		return errors.Join(errs...)
+	}
+	failAndRollback := func(orig error) error {
+		if rerr := rollback(); rerr != nil {
+			return fmt.Errorf("%w; rollback also failed: %v", orig, rerr)
+		}
+		return orig
 	}
 
 	// 1. Rewrite go.mod + go.sum in topo order.
 	if err := rewriteGoMods(ws, plan); err != nil {
-		rollback()
-		return nil, fmt.Errorf("rewrite go.mods: %w", err)
+		return nil, failAndRollback(fmt.Errorf("rewrite go.mods: %w", err))
 	}
 
 	// 2. Create the release commit (only if rewrites actually changed
@@ -92,18 +106,15 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 	// consumers produce zero go.mod rewrites, so there's nothing to
 	// commit — we tag the existing HEAD instead.
 	if _, err := gitx.Run(context.Background(), ws.Root, "add", "-A"); err != nil {
-		rollback()
-		return nil, err
+		return nil, failAndRollback(err)
 	}
 	hasStaged, err := hasStagedChanges(ws.Root)
 	if err != nil {
-		rollback()
-		return nil, err
+		return nil, failAndRollback(err)
 	}
 	if hasStaged {
 		if _, err := gitx.Run(context.Background(), ws.Root, "commit", "-m", plan.CommitMsg); err != nil {
-			rollback()
-			return nil, fmt.Errorf("create release commit: %w", err)
+			return nil, failAndRollback(fmt.Errorf("create release commit: %w", err))
 		}
 	}
 
@@ -111,22 +122,19 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 	// rewrite module paths (including any /vN majors) are visible.
 	verifyWS, err := workspace.Load(ws.Root)
 	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("reload workspace for verify: %w", err)
+		return nil, failAndRollback(fmt.Errorf("reload workspace for verify: %w", err))
 	}
 	paths := make([]string, 0, len(plan.Entries))
 	for _, e := range plan.Entries {
 		paths = append(paths, targetPath(e))
 	}
 	if err := Verify(ctx, verifyWS, paths); err != nil {
-		rollback()
-		return nil, fmt.Errorf("verify: %w", err)
+		return nil, failAndRollback(fmt.Errorf("verify: %w", err))
 	}
 
 	releaseSHAOut, err := gitx.Run(context.Background(), ws.Root, "rev-parse", "HEAD")
 	if err != nil {
-		rollback()
-		return nil, err
+		return nil, failAndRollback(err)
 	}
 	releaseSHA := trim(releaseSHAOut)
 
@@ -137,15 +145,13 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 			continue
 		}
 		if _, err := gitx.Run(context.Background(), ws.Root, "tag", e.TagName, releaseSHA); err != nil {
-			rollback()
-			return nil, fmt.Errorf("tag %s: %w", e.TagName, err)
+			return nil, failAndRollback(fmt.Errorf("tag %s: %w", e.TagName, err))
 		}
 		createdTags = append(createdTags, e.TagName)
 	}
 	if !tagAlreadyAt(ws.Root, plan.TrainTag, releaseSHA) {
 		if _, err := gitx.Run(context.Background(), ws.Root, "tag", plan.TrainTag, releaseSHA); err != nil {
-			rollback()
-			return nil, fmt.Errorf("tag %s: %w", plan.TrainTag, err)
+			return nil, failAndRollback(fmt.Errorf("tag %s: %w", plan.TrainTag, err))
 		}
 	}
 	createdTags = append(createdTags, plan.TrainTag)
