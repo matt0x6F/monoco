@@ -3,12 +3,11 @@
 package gitgraph
 
 import (
-	"bytes"
-	"fmt"
-	"os/exec"
+	"context"
 	"sort"
 	"strings"
 
+	"github.com/matt0x6f/monoco/internal/gitx"
 	"golang.org/x/mod/semver"
 )
 
@@ -22,7 +21,7 @@ type Commit struct {
 // TouchedFiles returns repo-relative paths of files changed between oldRef
 // and newRef (both inclusive of HEAD side per git diff --name-only).
 func TouchedFiles(root, oldRef, newRef string) ([]string, error) {
-	out, err := git(root, "diff", "--name-only", oldRef, newRef)
+	out, err := gitx.Run(context.Background(), root, "diff", "--name-only", oldRef, newRef)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +47,7 @@ func CommitsInRange(root, oldRef, newRef, path string) ([]Commit, error) {
 	if path != "" {
 		args = append(args, "--", path)
 	}
-	out, err := git(root, args...)
+	out, err := gitx.Run(context.Background(), root, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +73,7 @@ func CommitsInRange(root, oldRef, newRef, path string) ([]Commit, error) {
 // LatestTagForModule returns the highest-semver tag for a module whose
 // tag-prefix is modulePrefix (e.g. "modules/storage"). Returns "" if none.
 func LatestTagForModule(root, modulePrefix string) (string, error) {
-	out, err := git(root, "tag", "--list", modulePrefix+"/v*")
+	out, err := gitx.Run(context.Background(), root, "tag", "--list", modulePrefix+"/v*")
 	if err != nil {
 		return "", err
 	}
@@ -98,15 +97,4 @@ func LatestTagForModule(root, modulePrefix string) (string, error) {
 		return semver.Compare(versions[i], versions[j]) < 0
 	})
 	return versions[len(versions)-1], nil
-}
-
-func git(root string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %v: %w: %s", args, err, stderr.String())
-	}
-	return stdout.String(), nil
 }

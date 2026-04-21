@@ -3,10 +3,9 @@
 package propagate
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/matt0x6f/monoco/internal/bump"
 	"github.com/matt0x6f/monoco/internal/gitgraph"
+	"github.com/matt0x6f/monoco/internal/gitx"
 	"github.com/matt0x6f/monoco/internal/workspace"
 	"golang.org/x/mod/semver"
 )
@@ -351,7 +351,7 @@ func CurrentBranch(root string) (string, error) {
 }
 
 func currentBranch(root string) (string, error) {
-	out, err := shellGit(root, "symbolic-ref", "--short", "HEAD")
+	out, err := gitx.Run(context.Background(), root, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -366,7 +366,7 @@ var ErrNoRemoteRef = errors.New("remote has no such ref")
 // ref is a full ref (e.g. "refs/heads/main"). Returns ErrNoRemoteRef if
 // the remote reachable but has no such ref.
 func GetRemoteRefSHA(root, remote, ref string) (string, error) {
-	out, err := shellGit(root, "ls-remote", remote, ref)
+	out, err := gitx.Run(context.Background(), root, "ls-remote", remote, ref)
 	if err != nil {
 		return "", err
 	}
@@ -406,15 +406,4 @@ func normalizeRelDir(p string) string {
 	p = filepath.ToSlash(filepath.Clean(p))
 	p = strings.TrimPrefix(p, "./")
 	return p
-}
-
-func shellGit(root string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %v: %w: %s", args, err, stderr.String())
-	}
-	return stdout.String(), nil
 }
