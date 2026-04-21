@@ -33,8 +33,7 @@ We do not invent new build paradigms, override compiler behavior, or require use
 - `internal/config/` — `monoco.yaml` loader (optional; sane defaults).
 - `internal/tasks/` — test / lint / build / generate fanout over the affected set.
 - `internal/fixture/` — local git-repo fixtures for end-to-end tests.
-- `pocs/` — historical proof-of-concept experiments. Reference, not source of truth.
-- `docs/superpowers/specs/` — design specs.
+- `docs/` — technical documentation ([architecture](docs/architecture.md), [release model](docs/release-model.md), [POC findings](docs/poc-findings.md)).
 - `test/integration/` — integration suite against a real GitHub test monorepo (tag: `integration`).
 
 ## Development commands
@@ -55,7 +54,7 @@ Integration tests require `MONOCO_TEST_REPO_TOKEN` (a PAT with repo scope on the
 - `go.sum` rewrites must stay deterministic and offline. No network calls during `propagate` or `release`.
 - Tag naming follows Go's nested-module convention: `<module-path>/vX.Y.Z` for modules, `train/<date>-<slug>` for release trains. Do not change these without a spec update.
 - Errors from the Go toolchain should propagate with context, not be reinterpreted or papered over.
-- New user-visible behavior belongs in a spec under `docs/superpowers/specs/` before implementation.
+- Significant user-visible behavior changes should update [docs/architecture.md](docs/architecture.md) or [docs/release-model.md](docs/release-model.md) alongside the code.
 
 ## Out of scope
 

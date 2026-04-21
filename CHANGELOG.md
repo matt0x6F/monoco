@@ -28,7 +28,7 @@
   - Every module defaults to a `patch` bump. Override with `--bump <module>=<kind>` (repeatable). `=skip` drops a module from the plan.
   - No prompting: the command reads inputs, prints the plan, asks `Proceed?`, applies. `-y` skips the confirmation.
   - `--dry-run` prints the plan and exits without applying.
-- **`go.sum` population at release time.** Each downstream's `go.sum` now gets canonical `h1:` hashes for every freshly-tagged dep, computed in-process via `golang.org/x/mod/zip` + `golang.org/x/mod/sumdb/dirhash` — no network, no proxy, no tag-then-download race. (Validated by [POC-4](pocs/04-release-gosum/FINDINGS.md).)
+- **`go.sum` population at release time.** Each downstream's `go.sum` now gets canonical `h1:` hashes for every freshly-tagged dep, computed in-process via `golang.org/x/mod/zip` + `golang.org/x/mod/sumdb/dirhash` — no network, no proxy, no tag-then-download race. (Validated by POC-4; see [docs/poc-findings.md](docs/poc-findings.md).)
 - **Workspace-local `replace` directives are stripped** from downstream `go.mod`s as part of the release rewrite. Consumers checking out the released tag now build cleanly.
 - **Clean-working-tree preflight** before any release — no uncommitted or untracked changes. Prevents surprise-committing in-flight edits.
 - **Auto-rollback on any pre-push failure** — if rewrite, verify, commit, or tag creation fails, the working tree and refs are restored to their pre-run state.
@@ -53,6 +53,6 @@ First working release. End-to-end propagation flow validated against a fixture m
 - `monoco propagate apply --since <ref> [--remote <r>] [--slug <s>]` — execute a propagation: rewrite `go.mod`s → release commit → verify in module mode → tag → atomic push.
 
 ### Technical approach
-- **Workspace graph** built via `modfile.Parse` over each module's `go.mod`, not `go list` (per [POC-1 findings](pocs/FINDINGS.md)). 50-module chain in ~1ms.
-- **Verification** uses `go build -modfile=go.verify.mod` with synthesized `replace` directives (Strategy B from [POC-2](pocs/FINDINGS.md)).
+- **Workspace graph** built via `modfile.Parse` over each module's `go.mod`, not `go list` (per [POC-1 findings](docs/poc-findings.md)). 50-module chain in ~1ms.
+- **Verification** uses `go build -modfile=go.verify.mod` with synthesized `replace` directives (Strategy B from [POC-2](docs/poc-findings.md)).
 - **Atomic publishing** via `git push --atomic origin main <tag>...`.

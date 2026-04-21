@@ -116,7 +116,7 @@ This is what monoco actually competes with. For two or three modules, a shell sc
 
 ## Status
 
-Pre-1.0. Design validated by four POCs ([findings](pocs/FINDINGS.md)).
+Pre-1.0. Design validated by four POCs ([findings](docs/poc-findings.md)).
 
 ## Configuration (`monoco.yaml`, optional)
 
@@ -157,7 +157,8 @@ Excluded modules never show up in `monoco affected`, `monoco release`, or task f
 
 ## Development
 
-- [Design spec](docs/superpowers/specs/).
-- [POC findings](pocs/FINDINGS.md).
+- [Architecture](docs/architecture.md) — package map and data flow.
+- [Release model](docs/release-model.md) — cascade, verification, atomic push.
+- [POC findings](docs/poc-findings.md) — why the v1 design landed where it did.
 - Tests: `go test ./...`. End-to-end (local-fixture): `go test ./cmd/monoco/... -count=1`.
 - Integration (against the real GitHub test monorepo) runs on every push to `main` via `.github/workflows/integration.yml`. To run locally: `MONOCO_TEST_REPO_TOKEN=<PAT> go test -tags=integration ./test/integration/... -v`. See [test/integration/README.md](test/integration/README.md) for the scenario matrix and troubleshooting.
