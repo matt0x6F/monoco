@@ -136,6 +136,103 @@ func TestApply_rollsBackOnVerifyFailure(t *testing.T) {
 	}
 }
 
+func TestApply_bootstrapFromPlaceholders(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+		},
+	})
+	// No pre-seeded tags: this is the first-ever propagation.
+	run(t, fx.Root, "git", "push", "origin", "main")
+
+	const placeholder = "v0.0.0-00010101000000-000000000000"
+	apiModPath := filepath.Join(fx.Root, "modules/api/go.mod")
+	preApiMod, err := os.ReadFile(apiModPath)
+	if err != nil {
+		t.Fatalf("read api/go.mod: %v", err)
+	}
+	if !strings.Contains(string(preApiMod), placeholder) {
+		t.Fatalf("fixture should seed placeholder pseudo-version; api/go.mod:\n%s", preApiMod)
+	}
+
+	base := headSHA(t, fx.Root)
+
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
+		"package storage\n\nfunc StorageHello() string { return \"new\" }\nfunc Batch() string { return \"batch\" }\n")
+	run(t, fx.Root, "git", "add", "-A")
+	run(t, fx.Root, "git", "commit", "-m", "storage: add Batch")
+
+	ws, _ := workspace.Load(fx.Root)
+	plan, err := NewPlanForModules(ws, []string{"example.com/mono/storage"}, Options{
+		Slug:  "bootstrap",
+		Bumps: map[string]bump.Kind{"example.com/mono/storage": bump.Minor},
+	})
+	if err != nil {
+		t.Fatalf("NewPlanForModules: %v", err)
+	}
+
+	res, err := Apply(ws, plan, ApplyOptions{Remote: "origin"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if got := countCommitsSince(t, fx.Root, base); got != 2 {
+		t.Errorf("expected 2 commits after base (feat + release); got %d", got)
+	}
+
+	apiMod, _ := os.ReadFile(apiModPath)
+	if strings.Contains(string(apiMod), placeholder) {
+		t.Errorf("api/go.mod still contains placeholder after apply:\n%s", apiMod)
+	}
+	if !strings.Contains(string(apiMod), "example.com/mono/storage v0.1.0") {
+		t.Errorf("api/go.mod not rewritten to storage v0.1.0:\n%s", apiMod)
+	}
+
+	apiSum, err := os.ReadFile(filepath.Join(fx.Root, "modules/api/go.sum"))
+	if err != nil {
+		t.Fatalf("read api/go.sum: %v", err)
+	}
+	if !strings.Contains(string(apiSum), "example.com/mono/storage v0.1.0 h1:") {
+		t.Errorf("api/go.sum missing storage h1 line:\n%s", apiSum)
+	}
+	if !strings.Contains(string(apiSum), "example.com/mono/storage v0.1.0/go.mod h1:") {
+		t.Errorf("api/go.sum missing storage go.mod h1 line:\n%s", apiSum)
+	}
+
+	for _, expected := range []string{
+		"modules/storage/v0.1.0",
+		"modules/api/v0.1.0",
+		plan.TrainTag,
+	} {
+		if !tagExists(t, fx.Root, expected) {
+			t.Errorf("missing local tag %s", expected)
+		}
+	}
+
+	releaseSHA := res.ReleaseCommit
+	for _, tg := range []string{
+		"modules/storage/v0.1.0",
+		"modules/api/v0.1.0",
+		plan.TrainTag,
+	} {
+		if got := tagSHA(t, fx.Root, tg); got != releaseSHA {
+			t.Errorf("tag %s points at %s, not release commit %s", tg, got, releaseSHA)
+		}
+	}
+
+	remoteTags := remoteTagList(t, fx.RemoteDir)
+	for _, expected := range []string{
+		"modules/storage/v0.1.0",
+		"modules/api/v0.1.0",
+		plan.TrainTag,
+	} {
+		if !sliceContains(remoteTags, expected) {
+			t.Errorf("remote missing %s; has %v", expected, remoteTags)
+		}
+	}
+}
+
 func TestApply_refusesDirtyWorkingTree(t *testing.T) {
 	fx := fixture.New(t, fixture.Spec{
 		Modules: []fixture.ModuleSpec{{Name: "storage"}},
