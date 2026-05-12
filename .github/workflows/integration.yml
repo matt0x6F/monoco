@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   integration:
-    runs-on: ubuntu-latest
+    runs-on: monoco-runners
     # Belt-and-suspenders guard: secret won't be populated on fork PRs.
     # Since this workflow only runs on push-to-main + workflow_dispatch,
     # the secret is always available on approved runs, but the check
