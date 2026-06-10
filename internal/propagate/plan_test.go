@@ -270,3 +270,55 @@ func headSHA(t *testing.T, root string) string {
 	}
 	return s
 }
+
+func TestNewPlanForModules_requireCycleError(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "auth", DependsOn: []string{"users"}},
+			{Name: "users", DependsOn: []string{"auth"}},
+			{Name: "gateway", DependsOn: []string{"auth"}},
+		},
+	})
+	ws, err := workspace.Load(fx.Root)
+	if err != nil {
+		t.Fatalf("workspace.Load: %v", err)
+	}
+	_, err = NewPlanForModules(ws, []string{"example.com/mono/auth"}, Options{
+		Slug:  "test",
+		Bumps: map[string]bump.Kind{"example.com/mono/auth": bump.Minor},
+	})
+	if err == nil {
+		t.Fatal("expected a require-cycle error, got nil")
+	}
+	if !strings.Contains(err.Error(), "require cycle") {
+		t.Errorf("error should mention the require cycle, got: %v", err)
+	}
+	for _, m := range []string{"example.com/mono/auth", "example.com/mono/users"} {
+		if !strings.Contains(err.Error(), m) {
+			t.Errorf("error should name cycle member %s, got: %v", m, err)
+		}
+	}
+	if strings.Contains(err.Error(), "example.com/mono/gateway") {
+		t.Errorf("gateway is downstream of the cycle, not in it; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "skip") {
+		t.Errorf("error should point at the --bump skip remedy, got: %v", err)
+	}
+
+	// Skipping one side breaks the cycle and the plan goes through.
+	plan, err := NewPlanForModules(ws, []string{"example.com/mono/auth"}, Options{
+		Slug: "test",
+		Bumps: map[string]bump.Kind{
+			"example.com/mono/auth":  bump.Minor,
+			"example.com/mono/users": bump.Skip,
+		},
+	})
+	if err != nil {
+		t.Fatalf("plan with cycle broken by skip: %v", err)
+	}
+	for _, e := range plan.Entries {
+		if e.ModulePath == "example.com/mono/users" {
+			t.Errorf("skipped module present in plan: %+v", plan.Entries)
+		}
+	}
+}

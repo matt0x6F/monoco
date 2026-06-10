@@ -218,7 +218,11 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		}
 		active = append(active, m)
 	}
-	ordered := topoOrder(ws, active)
+	ordered, cycle := topoOrder(ws, active)
+	if len(cycle) > 0 {
+		sort.Strings(cycle)
+		return nil, fmt.Errorf("require cycle among release modules: %s\nan atomic release cannot tag both sides of a require cycle: each module's go.sum would need the h1: hash of the other's not-yet-final content, and those hashes are mutually recursive. Release one side at a time (--bump <module>=skip the others), keeping its require pinned to the previously tagged version", strings.Join(cycle, ", "))
+	}
 
 	entries := make([]Entry, 0, len(ordered))
 	for _, modPath := range ordered {
@@ -309,8 +313,11 @@ func transitiveClosure(ws *workspace.Workspace, seeds []string) []string {
 }
 
 // topoOrder returns module paths in a deterministic topological order:
-// if A requires B (B in workspace), B precedes A.
-func topoOrder(ws *workspace.Workspace, modules []string) []string {
+// if A requires B (B in workspace), B precedes A. Modules trapped in a
+// require cycle never reach in-degree zero; they are returned separately
+// in cycle so the caller can refuse the plan with a useful error instead
+// of silently dropping them.
+func topoOrder(ws *workspace.Workspace, modules []string) (ordered, cycle []string) {
 	inSet := map[string]bool{}
 	for _, m := range modules {
 		inSet[m] = true
@@ -349,7 +356,39 @@ func topoOrder(ws *workspace.Workspace, modules []string) []string {
 			}
 		}
 	}
-	return out
+	if len(out) < len(modules) {
+		// Everything Kahn's couldn't emit is either on a cycle or
+		// downstream of one. Iteratively trimming nodes with no
+		// consumers among the leftovers strips the downstream tail,
+		// so the error names only the modules that require each other.
+		left := map[string]bool{}
+		for _, m := range modules {
+			left[m] = true
+		}
+		for _, m := range out {
+			delete(left, m)
+		}
+		for trimmed := true; trimmed; {
+			trimmed = false
+			for m := range left {
+				hasConsumer := false
+				for _, c := range edges[m] {
+					if left[c] {
+						hasConsumer = true
+						break
+					}
+				}
+				if !hasConsumer {
+					delete(left, m)
+					trimmed = true
+				}
+			}
+		}
+		for m := range left {
+			cycle = append(cycle, m)
+		}
+	}
+	return out, cycle
 }
 
 // CurrentBranch returns the short name of the branch currently checked

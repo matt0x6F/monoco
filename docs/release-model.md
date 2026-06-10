@@ -20,6 +20,8 @@ monoco collapses this into one step:
 
 External consumers see honest per-module semver tags, resolvable by `go get` with no monoco knowledge required.
 
+**Why one commit can carry all the tags.** Go resolves a version tag → commit, never commit → tag. A single commit can therefore contain B's `go.mod` requiring `C@v0.2.0` while the tag `c/v0.2.0` points at that very commit — there is no ordering constraint to violate. The chicken-and-egg in the sequential flow comes from each tag needing to exist *on the remote* before the next module can build against it; landing every tag in one atomic push removes that gap entirely.
+
 ## The direct-affected set
 
 A **direct-affected** module is one whose source is under active local development. monoco identifies it by a workspace-local `replace` directive pointing at it from any sibling module's `go.mod`:
@@ -78,6 +80,12 @@ monoco computes the hashes in-process via `golang.org/x/mod/zip` + `golang.org/x
 Ordering matters: a cascaded module's *own* `go.mod` and `go.sum` are rewritten by the release, and those files are part of its module zip. Each module is therefore hashed only after its final content is known, walking the plan in topo order (dependencies before consumers), so the `h1:` lines a consumer pins describe the bytes the tag will actually contain. Hashing pre-rewrite state would poison the entry for every mid-chain module — the next module-mode build or `go mod tidy` would fail Go's checksum verification.
 
 Validated by POC-4 — see [poc-findings.md](poc-findings.md).
+
+## Require cycles are refused
+
+The one shape the atomic model cannot ship: two modules that require each other — directly or transitively — both in the same plan. A module's zip includes its own `go.sum`, so A's new zip would have to embed B's new `h1:` hash while B's embeds A's. The hashes are mutually recursive; no fixed point exists, for monoco or any other tool. This is a property of Go's checksum model, not a monoco choice: module-level cycles are legal in Go, and projects that have them always pin the *previous* version of the other side across the back-edge.
+
+`release` detects the cycle while topo-ordering the plan and refuses, naming the members. The remedy is the same one the Go ecosystem uses: release one side at a time (`--bump <module>=skip` the others), keeping its require pinned to the previously tagged version of the other side.
 
 ## Atomic publish
 
