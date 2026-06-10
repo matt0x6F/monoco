@@ -182,7 +182,8 @@ type RewrittenMod struct {
 	GoModPath    string                      // absolute path to go.mod
 	Old          []byte                      // current bytes on disk
 	New          []byte                      // proposed bytes after applying the plan
-	SumAdds      []string                    // lines to append to this module's go.sum (may be empty)
+	SumAdds      []string                    // lines merged into this module's go.sum (may be empty)
+	SumNew       []byte                      // full proposed go.sum contents (valid iff SumAdds non-empty)
 	GoSumPath    string                      // absolute path to go.sum (valid iff SumAdds non-empty)
 	GoFileEdits  []importrewrite.FileChange  // .go source rewrites for major-version path migrations
 	SkippedFiles []importrewrite.SkippedFile // .go files the rewriter skipped (build-tag gated)
@@ -224,19 +225,14 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 		}
 	}
 
-	// Precompute canonical h1: hashes for each released module, keyed
-	// by the module's post-plan path (so entries generated from a
-	// /vN-rewritten go.mod line up).
+	// Canonical h1: hashes for each released module, keyed by the
+	// module's post-plan path (so entries generated from a /vN-rewritten
+	// go.mod line up). Each module is hashed only after its own rewrites
+	// are known — plan.Entries is topo-ordered (dependencies before
+	// consumers), so a consumer's go.sum entry always describes the
+	// content its dependency will actually have at the release commit.
+	// Hashing pre-rewrite state would corrupt every mid-chain entry.
 	hashes := map[string]ModuleHashes{}
-	for _, e := range plan.Entries {
-		dir := ws.Modules[e.ModulePath].Dir
-		target := targetPath(e)
-		h, err := ComputeModuleHashes(dir, target, e.NewVersion)
-		if err != nil {
-			return nil, fmt.Errorf("hash %s@%s: %w", target, e.NewVersion, err)
-		}
-		hashes[target] = h
-	}
 
 	out := map[string]RewrittenMod{}
 	for _, e := range plan.Entries {
@@ -322,10 +318,14 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 
 		// Always compute sum additions for deps this module references
 		// (caught via Require above). Cascaded modules may have no
-		// in-plan requires — skip them.
+		// in-plan requires — skip them. Deps precede this module in
+		// plan order, so their post-rewrite hashes are already known.
 		var sumAdds []string
 		for dep := range referencedDeps {
-			h := hashes[dep]
+			h, hashed := hashes[dep]
+			if !hashed {
+				return nil, fmt.Errorf("internal: %s required by %s before being hashed; require cycle among released modules?", dep, e.ModulePath)
+			}
 			depV := targetVersion[dep]
 			sumAdds = append(sumAdds,
 				fmt.Sprintf("%s %s %s", dep, depV, h.H1),
@@ -349,14 +349,54 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 			skipped = rep.SkippedFiles
 		}
 
-		if !modChanged && len(sumAdds) == 0 && len(goEdits) == 0 {
-			continue
+		goSumPath := filepath.Join(modDir, "go.sum")
+		var sumNew []byte
+		if len(sumAdds) > 0 {
+			existing, rerr := os.ReadFile(goSumPath)
+			if rerr != nil && !os.IsNotExist(rerr) {
+				return nil, fmt.Errorf("read %s: %w", goSumPath, rerr)
+			}
+			sumNew = mergeGoSumBytes(existing, sumAdds)
 		}
 
-		mf.Cleanup()
-		formatted, err := mf.Format()
+		noWrite := !modChanged && len(sumAdds) == 0 && len(goEdits) == 0
+
+		// This module's final go.mod bytes: formatted when a rewrite will
+		// be written, the on-disk bytes when nothing changes (Format may
+		// normalize cosmetically, and an unwritten file keeps its bytes).
+		goModFinal := b
+		var formatted []byte
+		if !noWrite {
+			mf.Cleanup()
+			formatted, err = mf.Format()
+			if err != nil {
+				return nil, fmt.Errorf("format %s: %w", goModPath, err)
+			}
+			goModFinal = formatted
+		}
+
+		// Hash this module as it will exist at the release commit, so
+		// consumers later in plan order pin the tagged content.
+		overlay := map[string][]byte{"go.mod": goModFinal}
+		if len(sumNew) > 0 {
+			overlay["go.sum"] = sumNew
+		}
+		for _, fc := range goEdits {
+			relPath, rerr := filepath.Rel(modDir, fc.Path)
+			if rerr != nil {
+				return nil, fmt.Errorf("relativize %s: %w", fc.Path, rerr)
+			}
+			overlay[filepath.ToSlash(relPath)] = fc.New
+		}
+		target := targetPath(e)
+		h, err := hashModuleWithOverlay(modDir, target, e.NewVersion, overlay)
 		if err != nil {
-			return nil, fmt.Errorf("format %s: %w", goModPath, err)
+			return nil, fmt.Errorf("hash %s@%s: %w", target, e.NewVersion, err)
+		}
+		hashes[target] = h
+
+		if noWrite {
+			continue
 		}
 
 		r := RewrittenMod{
@@ -364,11 +404,12 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 			Old:          b,
 			New:          formatted,
 			SumAdds:      sumAdds,
+			SumNew:       sumNew,
 			GoFileEdits:  goEdits,
 			SkippedFiles: skipped,
 		}
 		if len(sumAdds) > 0 {
-			r.GoSumPath = filepath.Join(ws.Modules[e.ModulePath].Dir, "go.sum")
+			r.GoSumPath = goSumPath
 		}
 		out[e.ModulePath] = r
 	}
@@ -393,29 +434,27 @@ func rewriteGoMods(ws *workspace.Workspace, plan *Plan) error {
 				return fmt.Errorf("write %s: %w", fc.Path, err)
 			}
 		}
-		if len(r.SumAdds) == 0 {
+		if len(r.SumNew) == 0 {
 			continue
 		}
-		if err := mergeGoSum(r.GoSumPath, r.SumAdds); err != nil {
-			return fmt.Errorf("merge %s: %w", r.GoSumPath, err)
+		// Write the exact bytes that were hashed in ComputeRewrites so
+		// the release commit matches the h1: entries pinned downstream.
+		if err := os.WriteFile(r.GoSumPath, r.SumNew, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", r.GoSumPath, err)
 		}
 	}
 	return nil
 }
 
-// mergeGoSum appends lines to a go.sum, deduplicating with any existing
-// content, and keeps the file sorted.
-func mergeGoSum(goSumPath string, adds []string) error {
+// mergeGoSumBytes merges adds into existing go.sum content,
+// deduplicating, and keeps the result sorted.
+func mergeGoSumBytes(existingContent []byte, adds []string) []byte {
 	var existing [][]byte
-	if b, err := os.ReadFile(goSumPath); err == nil {
-		for _, line := range bytes.Split(b, []byte("\n")) {
-			if len(line) == 0 {
-				continue
-			}
-			existing = append(existing, line)
+	for _, line := range bytes.Split(existingContent, []byte("\n")) {
+		if len(line) == 0 {
+			continue
 		}
-	} else if !os.IsNotExist(err) {
-		return err
+		existing = append(existing, line)
 	}
 	seen := map[string]struct{}{}
 	for _, l := range existing {
@@ -436,7 +475,7 @@ func mergeGoSum(goSumPath string, adds []string) error {
 		buf.Write(l)
 		buf.WriteByte('\n')
 	}
-	return os.WriteFile(goSumPath, buf.Bytes(), 0o644)
+	return buf.Bytes()
 }
 
 func requireCleanWorkingTree(root string) error {

@@ -75,6 +75,8 @@ Downstreams' `go.sum` files need canonical `h1:` hashes for the freshly-tagged d
 
 monoco computes the hashes in-process via `golang.org/x/mod/zip` + `golang.org/x/mod/sumdb/dirhash`. No network, no proxy, no tag-then-download race. The hashes are bit-identical to what the Go module proxy would produce after the push, so consumers' `go.sum` verification passes cleanly.
 
+Ordering matters: a cascaded module's *own* `go.mod` and `go.sum` are rewritten by the release, and those files are part of its module zip. Each module is therefore hashed only after its final content is known, walking the plan in topo order (dependencies before consumers), so the `h1:` lines a consumer pins describe the bytes the tag will actually contain. Hashing pre-rewrite state would poison the entry for every mid-chain module — the next module-mode build or `go mod tidy` would fail Go's checksum verification.
+
 Validated by POC-4 — see [poc-findings.md](poc-findings.md).
 
 ## Atomic publish
