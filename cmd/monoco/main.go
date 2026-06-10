@@ -123,6 +123,13 @@ version: 1
 # tasks:
 #   lint:
 #     command: ["golangci-lint", "run", "--timeout=5m"]
+
+# Branches monoco release may push to besides the remote's default
+# branch (glob patterns). Releases always push directly to a long-lived
+# branch; releasing from a PR branch is refused because squash/rebase
+# merges orphan the tags.
+# release_branches:
+#   - release-*
 `
 
 func writeManifestStubIfMissing(root string) (bool, error) {

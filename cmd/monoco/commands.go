@@ -68,11 +68,12 @@ func cmdRelease(root string, args []string) {
 	}
 
 	opts := release.Options{
-		Bumps:      bumpMap,
-		Slug:       *slug,
-		Remote:     *remote,
-		AllowMajor: allowMajorSet,
-		Cuts:       cutSet,
+		Bumps:           bumpMap,
+		Slug:            *slug,
+		Remote:          *remote,
+		AllowMajor:      allowMajorSet,
+		Cuts:            cutSet,
+		ReleaseBranches: cfg.ReleaseBranches,
 	}
 
 	// Dry-run is offline: don't ls-remote for a base SHA we won't use.

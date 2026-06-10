@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Direct pushes are now a requirement.** When a push is intended, `release` refuses to run from any branch other than the remote's default branch (or a `release_branches` glob in `monoco.yaml`, for long-lived maintenance branches). Tags pin SHAs and never follow rewrites, so a release cut on a PR branch is orphaned the moment the PR is squash- or rebase-merged. Feature PRs keep whatever merge strategy you like — the release happens after merge, directly on the long-lived branch. See [docs/release-model.md](docs/release-model.md#direct-push-is-the-contract).
 - **Staged releases for require cycles.** Modules that require each other can't be tagged at the same commit (mutually recursive `go.sum` hashes), so `release` now stages them: an ordered chain of commits inside one atomic push, where the first side ships still requiring its partner's previous tag and the second pins the first's new tag. The order is derived by verification — a side may ship first only if its new content builds against the partner's previously tagged content (materialized via `git worktree`), which is what its external consumers will resolve. `--cut <module>` forces the order. If neither order compiles, the modules are release-coupled and the release is refused with that diagnosis. Acyclic plans are unchanged: one commit, identical output. See [docs/release-model.md](docs/release-model.md#require-cycles-are-staged).
 
 ### Fixed

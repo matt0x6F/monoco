@@ -496,6 +496,31 @@ func currentBranch(root string) (string, error) {
 // but has no such ref (e.g. the branch hasn't been pushed yet).
 var ErrNoRemoteRef = errors.New("remote has no such ref")
 
+// ErrNoDefaultBranch is returned by GetRemoteDefaultBranch when the
+// remote advertises no HEAD symref (e.g. a fresh empty remote).
+var ErrNoDefaultBranch = errors.New("remote advertises no default branch")
+
+// GetRemoteDefaultBranch returns the branch name the remote's HEAD
+// symref points at — the repository's default branch — via
+// `git ls-remote --symref`.
+func GetRemoteDefaultBranch(root, remote string) (string, error) {
+	out, err := gitx.Run(context.Background(), root, "ls-remote", "--symref", remote, "HEAD")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ref:")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest) // e.g. ["refs/heads/main", "HEAD"]
+		if len(fields) >= 1 && strings.HasPrefix(fields[0], "refs/heads/") {
+			return strings.TrimPrefix(fields[0], "refs/heads/"), nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s", ErrNoDefaultBranch, remote)
+}
+
 // GetRemoteRefSHA returns the SHA of ref on remote via `git ls-remote`.
 // ref is a full ref (e.g. "refs/heads/main"). Returns ErrNoRemoteRef if
 // the remote reachable but has no such ref.

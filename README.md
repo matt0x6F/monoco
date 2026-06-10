@@ -102,6 +102,7 @@ Gotchas worth flagging when you copy it:
 - A **cascaded** module is a consumer of a direct-affected module. It gets the same default-patch treatment as directs; override with `--bump` if needed.
 - Major-version boundary crossings need an explicit opt-in: `--allow-major <module>` (or `allow_major` in `monoco.yaml`). monoco then rewrites the `/vN` suffix across the bumper's `module` line and every consumer's `require` + imports. At most one module per release may cross.
 - On a v0 module, `--bump <module>=major` coerces to a minor bump (`v0.2.0 → v0.3.0`) — v0 is explicitly unstable in Go's semver convention, so there's no boundary to cross. Bump to `v1` by tagging `<module>/v1.0.0` by hand once, then let monoco take over.
+- **Releases push directly to a long-lived branch — never through a PR.** Tags pin SHAs; squash- or rebase-merging a branch that carries release commits orphans every tag on it. `release` refuses to run from anything but the remote's default branch (or a `release_branches` glob in `monoco.yaml`, for maintenance branches). Feature PRs are unaffected — merge those however you like; the release happens after merge. See [docs/release-model.md](docs/release-model.md#direct-push-is-the-contract).
 - **Modules that require each other are released in stages** — an ordered chain of commits inside one atomic push. The two can't share a commit (each side's `go.sum` would need the other's not-yet-final `h1:` hash — mutually recursive, a property of Go's checksum model), so the first side ships at commit 1 keeping its require on the other at the previous tag, and the second ships at commit 2 pinning the first's new tag. monoco picks the order by verifying which side compiles against its partner's previously tagged content; `--cut <module>` overrides. If *neither* order compiles, the modules are release-coupled — each needs the other's new API — and the release is refused: that cycle is one module pretending to be two. See [docs/release-model.md](docs/release-model.md#require-cycles-are-staged).
 
 ## How it works
@@ -177,6 +178,11 @@ exclude: []
 # Per-task argv overrides. Omitted tasks keep their built-in defaults
 # (go test ./..., golangci-lint run, go build ./..., go generate ./...).
 tasks: {}
+
+# Branches `monoco release` may push to besides the remote's default
+# branch (glob patterns, e.g. release-*). Releases always push directly
+# to a long-lived branch; PR branches are refused.
+release_branches: []
 ```
 
 Example:

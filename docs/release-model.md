@@ -113,6 +113,14 @@ git push --atomic origin <branch> <per-module tags...> <train tag>
 
 `--atomic` has been in git since 2.4 (2015) and is enforced by the git wire protocol, not by GitHub/GitLab/etc. Either every ref lands or none do — including in the pre-receive hook rejection case. No server-side infrastructure assumptions needed.
 
+## Direct push is the contract
+
+Release commits and tags land **only** via monoco's atomic push to a long-lived branch — never through a pull request. Tags pin SHAs and never follow rewrites: a release cut on a PR branch is orphaned the moment the PR is squash- or rebase-merged. The tagged commits stay resolvable by `go get` forever (tag refs keep them alive), but they vanish from the branch's history — `git tag --contains`, bisect, and release auditing all break, and the train tag marks a commit the default branch has never seen. Correctness preserved, hygiene destroyed; monoco refuses to set it up.
+
+Concretely, when a push is intended (`--remote` set), `release` requires the current branch to be the remote's **default branch**, or one matching a `release_branches` glob in `monoco.yaml` (for maintenance branches like `release-1.x`, which are long-lived and direct-pushed too). Feature PRs are unaffected — merge them with squash, rebase, or merge commits as you like; the release happens *after* merge, on the long-lived branch, like the reference CI workflow's `apply` job.
+
+If branch protection forbids all direct pushes, give the release job a bypass (a GitHub App token or PAT with `contents: write`) rather than routing the release through a PR. A strict no-bypass, squash-only policy is the one configuration monoco's model cannot serve.
+
 Before the push, if any step fails (rewrite, verify, commit, tag), the working tree and refs are restored to their pre-run state. If the push itself fails, the local release commit and tags are kept; rerun `release` after fixing the push condition (e.g., the remote moved ahead, TOCTOU lease broken).
 
 ## TOCTOU protection
