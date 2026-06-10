@@ -102,7 +102,7 @@ Gotchas worth flagging when you copy it:
 - A **cascaded** module is a consumer of a direct-affected module. It gets the same default-patch treatment as directs; override with `--bump` if needed.
 - Major-version boundary crossings need an explicit opt-in: `--allow-major <module>` (or `allow_major` in `monoco.yaml`). monoco then rewrites the `/vN` suffix across the bumper's `module` line and every consumer's `require` + imports. At most one module per release may cross.
 - On a v0 module, `--bump <module>=major` coerces to a minor bump (`v0.2.0 → v0.3.0`) — v0 is explicitly unstable in Go's semver convention, so there's no boundary to cross. Bump to `v1` by tagging `<module>/v1.0.0` by hand once, then let monoco take over.
-- **Modules that require each other can't ship in the same release.** Each side's `go.sum` would need the `h1:` hash of the other's not-yet-final content — the hashes are mutually recursive, so no tool can produce them (this is a property of Go's checksum model, not a monoco limitation). `release` refuses the plan and names the cycle; ship one side at a time with `--bump <module>=skip`, keeping its require pinned to the other's previously tagged version.
+- **Modules that require each other are released in stages** — an ordered chain of commits inside one atomic push. The two can't share a commit (each side's `go.sum` would need the other's not-yet-final `h1:` hash — mutually recursive, a property of Go's checksum model), so the first side ships at commit 1 keeping its require on the other at the previous tag, and the second ships at commit 2 pinning the first's new tag. monoco picks the order by verifying which side compiles against its partner's previously tagged content; `--cut <module>` overrides. If *neither* order compiles, the modules are release-coupled — each needs the other's new API — and the release is refused: that cycle is one module pretending to be two. See [docs/release-model.md](docs/release-model.md#require-cycles-are-staged).
 
 ## How it works
 
@@ -112,9 +112,9 @@ Every `release` is one atomic operation:
 2. Transitively expand to consumers via the reverse-dep graph (the **cascade**).
 3. Apply bump kinds: every module defaults to `patch`, with `--bump <module>=<kind>` overriding where needed (or `=skip` to drop a module). Print the plan.
 4. On confirmation (or `-y`), rewrite every downstream `go.mod` to pin the new tag version, drop workspace-local `replace` directives, and populate `go.sum` with canonical `h1:` hashes (computed in-process — no network, no proxy).
-5. Create one release commit containing all the rewrites.
-6. Verify in module mode (`-modfile=<alt>` with `replace` directives for workspace siblings) — catches rewrites that break downstream source, which workspace mode hides.
-7. Tag every module in the plan + a train tag, all pointing at the release commit.
+5. Create one release commit containing all the rewrites. (A require cycle in the plan produces an ordered chain of commits instead — one per stage — so each side of the cycle is final before its partner pins it.)
+6. Verify in module mode (`-modfile=<alt>` with `replace` directives for workspace siblings; cycle back-edges verify against the previously tagged content they pin) — catches rewrites that break downstream source, which workspace mode hides.
+7. Tag every module in the plan at its stage's commit + a train tag at the tip.
 8. `git push --atomic origin <branch> <tags...>` — all or nothing.
 
 If anything before the push fails, the working tree and refs are restored to their pre-run state. If the push fails, the local commit and tags are kept; rerun `release` after fixing the push condition.

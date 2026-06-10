@@ -36,6 +36,11 @@ type Options struct {
 	// path (the form in go.mod's `module` line, without any `/vN`
 	// suffix). At most one module per plan may cross; see buildPlan.
 	AllowMajor map[string]struct{}
+	// Cuts forces the first module to peel from a require cycle: the
+	// named module releases in the cycle's earliest stage, keeping its
+	// requires on the other members at their previous tags. Only valid
+	// when the plan actually contains a cycle. See stagePlan.
+	Cuts map[string]struct{}
 	// BaseRef is the remote ref the plan's commit will be pushed to
 	// (e.g. "refs/heads/main"). Empty when no push is intended.
 	BaseRef string
@@ -54,12 +59,15 @@ type Entry struct {
 	TagName      string    // <RelDir>/<NewVersion>
 	DirectChange bool      // true if affected by a replace; false if cascaded
 	MajorBump    bool      // true if this entry crosses a major version boundary
+	Stage        int       // 1-based release stage; >1 only when a require cycle forces staging
+	PinnedOld    []Pin     // in-plan requires this entry leaves at their previous tags (cycle back-edges)
 }
 
 // Plan is a deterministic propagation plan.
 type Plan struct {
 	Root      string
 	Entries   []Entry
+	Stages    int    // number of release commits; 1 unless a require cycle forces staging
 	TrainTag  string // train/<YYYY-MM-DD>-<slug>
 	CommitMsg string // "release: <TrainTag>"
 	// BaseRef is the remote ref the release will push to (e.g.
@@ -219,9 +227,32 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		active = append(active, m)
 	}
 	ordered, cycle := topoOrder(ws, active)
+	stageOf := map[string]int{}
+	pins := map[string][]Pin{}
+	maxStage := 1
 	if len(cycle) > 0 {
-		sort.Strings(cycle)
-		return nil, fmt.Errorf("require cycle among release modules: %s\nan atomic release cannot tag both sides of a require cycle: each module's go.sum would need the h1: hash of the other's not-yet-final content, and those hashes are mutually recursive. Release one side at a time (--bump <module>=skip the others), keeping its require pinned to the previously tagged version", strings.Join(cycle, ", "))
+		// Modules that require each other cannot be tagged at the same
+		// commit (mutually recursive go.sum hashes), but they can be
+		// tagged at successive commits inside one atomic push. Assign
+		// stages; the entry order becomes (stage, topo-within-stage).
+		for _, m := range cycle {
+			if majorBumps[m] {
+				return nil, fmt.Errorf("module %s is in a require cycle and would cross a major version boundary; staged releases pin the previously tagged content of cycle partners, and a /vN path rewrite cannot apply across that pin. Release the major bump separately after breaking the cycle", m)
+			}
+		}
+		var serr error
+		stageOf, pins, maxStage, serr = stagePlan(ws, active, directSet, opts.Cuts)
+		if serr != nil {
+			return nil, serr
+		}
+		ordered = topoOrderStaged(ws, active, stageOf)
+	} else if len(opts.Cuts) > 0 {
+		cuts := make([]string, 0, len(opts.Cuts))
+		for c := range opts.Cuts {
+			cuts = append(cuts, c)
+		}
+		sort.Strings(cuts)
+		return nil, fmt.Errorf("--cut %s: not part of a require cycle in this plan", strings.Join(cuts, ", "))
 	}
 
 	entries := make([]Entry, 0, len(ordered))
@@ -233,6 +264,10 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 		if err := validateModuleTag(tag); err != nil {
 			return nil, fmt.Errorf("module %s: %w", modPath, err)
 		}
+		stage := stageOf[modPath]
+		if stage == 0 {
+			stage = 1
+		}
 		entries = append(entries, Entry{
 			ModulePath:   modPath,
 			RelDir:       rel,
@@ -242,6 +277,8 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 			TagName:      tag,
 			DirectChange: isDirect,
 			MajorBump:    majorBumps[modPath],
+			Stage:        stage,
+			PinnedOld:    pins[modPath],
 		})
 	}
 
@@ -265,11 +302,61 @@ func buildPlan(ws *workspace.Workspace, modules []string, directSet map[string]s
 	return &Plan{
 		Root:      ws.Root,
 		Entries:   entries,
+		Stages:    maxStage,
 		TrainTag:  train,
 		CommitMsg: "release: " + train,
 		BaseRef:   opts.BaseRef,
 		BaseSHA:   opts.BaseSHA,
 	}, nil
+}
+
+// topoOrderStaged orders modules for a staged plan: primarily by stage,
+// and topologically within. Back-edges (a dependency staged LATER than
+// its consumer — the pinned edges that made the graph cyclic) are
+// excluded, which renders the graph acyclic; a stable sort by stage then
+// groups the release commits while preserving dep-before-consumer order
+// for every edge that ships a new version.
+func topoOrderStaged(ws *workspace.Workspace, modules []string, stageOf map[string]int) []string {
+	inSet := map[string]bool{}
+	for _, m := range modules {
+		inSet[m] = true
+	}
+	inDegree := map[string]int{}
+	edges := map[string][]string{}
+	for _, m := range modules {
+		inDegree[m] = 0
+	}
+	for _, m := range modules {
+		for _, consumer := range ws.Consumers(m) {
+			if !inSet[consumer] || stageOf[m] > stageOf[consumer] {
+				continue
+			}
+			edges[m] = append(edges[m], consumer)
+			inDegree[consumer]++
+		}
+	}
+	var out []string
+	var ready []string
+	for m, d := range inDegree {
+		if d == 0 {
+			ready = append(ready, m)
+		}
+	}
+	sort.Strings(ready)
+	for len(ready) > 0 {
+		cur := ready[0]
+		ready = ready[1:]
+		out = append(out, cur)
+		for _, next := range edges[cur] {
+			inDegree[next]--
+			if inDegree[next] == 0 {
+				ready = append(ready, next)
+				sort.Strings(ready)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return stageOf[out[i]] < stageOf[out[j]] })
+	return out
 }
 
 // ModulePaths returns the entries' module paths in plan (topo) order.

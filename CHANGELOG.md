@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- **Staged releases for require cycles.** Modules that require each other can't be tagged at the same commit (mutually recursive `go.sum` hashes), so `release` now stages them: an ordered chain of commits inside one atomic push, where the first side ships still requiring its partner's previous tag and the second pins the first's new tag. The order is derived by verification — a side may ship first only if its new content builds against the partner's previously tagged content (materialized via `git worktree`), which is what its external consumers will resolve. `--cut <module>` forces the order. If neither order compiles, the modules are release-coupled and the release is refused with that diagnosis. Acyclic plans are unchanged: one commit, identical output. See [docs/release-model.md](docs/release-model.md#require-cycles-are-staged).
+
 ### Fixed
 
-- **Require cycles are now refused with a clear error instead of silently dropping modules.** Two modules that require each other cannot ship in one release — their `go.sum` hashes would be mutually recursive (a property of Go's checksum model, not monoco). Previously the planner's topo sort silently omitted cycle members from the plan; now `release` names the cycle and points at the `--bump <module>=skip` remedy. See the new "Require cycles are refused" section in [docs/release-model.md](docs/release-model.md).
+- **Require cycles no longer silently drop modules from the plan.** Previously the planner's topo sort omitted cycle members without a word; now they are released in stages (see Added above), or refused with a release-coupled diagnosis when no staged order compiles.
 - **`go.sum` entries for cascaded modules hashed pre-rewrite content.** `release` computed every module's `h1:` hashes up front, before rewriting `go.mod`/`go.sum` — but those files are part of the module zip, so for any mid-chain module (one with both a dependency and a consumer in the plan) the hash pinned downstream described content that never got tagged. Consumers' next module-mode build or `go mod tidy` failed Go's checksum verification with a SECURITY ERROR. Modules are now hashed in plan (topo) order, each after its own rewrites are final.
 
 ### Added

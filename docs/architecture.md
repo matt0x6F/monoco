@@ -53,12 +53,13 @@ Loads the optional `monoco.yaml`. Absence is equivalent to zero-config defaults 
 
 The heavy lifter. Two phases:
 
-- **`plan.go`** — from a set of direct-affected modules, expand to consumers (auto-patched), enforce the at-most-one-major-boundary rule, and produce an ordered list of `Entry` values with rewrite metadata (new versions, tag names, go.mod rewrites).
-- **`apply.go`** — execute the plan: rewrite `go.mod` / `go.sum`, create the release commit, tag, and push atomically. TOCTOU-protected via base-SHA leases on the remote ref.
+- **`plan.go`** — from a set of direct-affected modules, expand to consumers (auto-patched), enforce the at-most-one-major-boundary rule, and produce an ordered list of `Entry` values with rewrite metadata (new versions, tag names, go.mod rewrites, release stages).
+- **`stage.go`** — require-cycle staging: SCC condensation, the verified greedy peel that picks which cycle member releases first, and `git worktree` materialization of previously tagged content (see [release-model.md](release-model.md#require-cycles-are-staged)).
+- **`apply.go`** — execute the plan: rewrite `go.mod` / `go.sum`, create one release commit per stage (one total when acyclic), tag each module at its stage's commit, and push atomically. TOCTOU-protected via base-SHA leases on the remote ref.
 - **`gosum.go`** — in-process canonical `h1:` hash computation via `golang.org/x/mod/zip` + `sumdb/dirhash`. No network (see [POC-4 findings](poc-findings.md)).
 - **`importrewrite/`** — v2+ path rewriting across `module`, `require`, and imports for major-version boundary crossings.
 
-**API:** `Plan`, `Entry`, `Options`, `ApplyResult`, `NewPlanForModules`, `Apply`, `ComputeRewrites`, `CascadeExpansion`.
+**API:** `Plan`, `Entry`, `Pin`, `Options`, `ApplyResult`, `NewPlanForModules`, `Apply`, `ComputeRewrites`, `CascadeExpansion`, `Verify`, `VerifyPinned`.
 
 ### `internal/release`
 

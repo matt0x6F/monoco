@@ -10,6 +10,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/matt0x6f/monoco/internal/bump"
@@ -32,6 +33,10 @@ type Options struct {
 	// version boundary in this release. Typically unioned from the
 	// --allow-major CLI flag and monoco.yaml's allow_major entries.
 	AllowMajor map[string]struct{}
+	// Cuts forces which module of a require cycle releases first (its
+	// requires on the other cycle members stay at their previous tags).
+	// From the --cut CLI flag. Only valid when the plan has a cycle.
+	Cuts map[string]struct{}
 	// Branch overrides the branch to push to; defaults to current.
 	Branch string
 }
@@ -94,6 +99,7 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 		Slug:       opts.Slug,
 		Bumps:      bumps,
 		AllowMajor: opts.AllowMajor,
+		Cuts:       opts.Cuts,
 	}
 	// Capture the remote branch SHA so Apply can detect concurrent
 	// pushes. Only meaningful when we intend to push.
@@ -165,8 +171,13 @@ var latestTag = gitgraph.LatestTagForModule
 
 func printPlan(w io.Writer, p *propagate.Plan) {
 	fmt.Fprintf(w, "\nPlan:\n  Train: %s\n\n", p.TrainTag)
+	staged := p.Stages > 1
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "  MODULE\tOLD\tNEW\tKIND\tDIRECT")
+	if staged {
+		fmt.Fprintln(tw, "  STAGE\tMODULE\tOLD\tNEW\tKIND\tDIRECT\tNOTES")
+	} else {
+		fmt.Fprintln(tw, "  MODULE\tOLD\tNEW\tKIND\tDIRECT")
+	}
 	for _, e := range p.Entries {
 		old := e.OldVersion
 		if old == "" {
@@ -176,8 +187,19 @@ func printPlan(w io.Writer, p *propagate.Plan) {
 		if e.DirectChange {
 			direct = "direct"
 		}
+		if staged {
+			var notes []string
+			for _, pin := range e.PinnedOld {
+				notes = append(notes, fmt.Sprintf("pins %s@%s (previous)", pin.Path, pin.Version))
+			}
+			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\n", e.Stage, e.ModulePath, old, e.NewVersion, e.Kind, direct, strings.Join(notes, "; "))
+			continue
+		}
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", e.ModulePath, old, e.NewVersion, e.Kind, direct)
 	}
 	tw.Flush()
+	if staged {
+		fmt.Fprintf(w, "\n  %d release commits in one atomic push: a require cycle was staged.\n", p.Stages)
+	}
 	fmt.Fprintln(w)
 }
