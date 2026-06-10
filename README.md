@@ -20,6 +20,8 @@ Requires Go 1.22+.
 
 ```bash
 # One-time: generate go.work from your existing go.mod files.
+# Commit what it writes — and go.work.sum once workspace commands
+# create it — because `release` requires a clean working tree.
 monoco init
 
 # During development, pin in-flight modules with a workspace-local replace
@@ -50,6 +52,12 @@ monoco build --since origin/main
 monoco generate --since origin/main
 ```
 
+The fanout commands exist because `go build ./...` at the workspace root
+doesn't cross module boundaries — Go's package patterns stop at the
+module containing the current directory
+([golang/go#50745](https://github.com/golang/go/issues/50745)). monoco
+runs the standard command in each affected module instead.
+
 ## Using monoco in CI
 
 monoco is a CLI, so CI calls it like any other Go binary. A reference
@@ -79,9 +87,9 @@ Gotchas worth flagging when you copy it:
   same repo. If branch protection blocks bot pushes, swap in a PAT or a
   GitHub App token with `contents: write` on `actions/checkout` and
   update the `apply` job accordingly.
-- Major-version bumps across the `/vN` boundary are refused today
-  (see [Conventions](#conventions)); the workflow won't rescue you from
-  that — `monoco release --dry-run` will just fail the `plan` job.
+- Major-version bumps across the `/vN` boundary require an explicit
+  `--allow-major <module>` (or `allow_major` in `monoco.yaml`); without
+  it, `monoco release --dry-run` will just fail the `plan` job.
 
 ## Conventions
 
@@ -92,7 +100,9 @@ Gotchas worth flagging when you copy it:
 - **Bump kinds default to `patch`** for every module in the plan. Override per-module with `--bump <module>=<minor|major|skip>`. No commit-message inference, no prompting, no Conventional Commits dependency.
 - A **direct-affected** module is one whose source is under active local development, identified by the presence of a workspace-local `replace` directive pointing at it from any sibling module's `go.mod`.
 - A **cascaded** module is a consumer of a direct-affected module. It gets the same default-patch treatment as directs; override with `--bump` if needed.
-- v2+ major-version boundary crossings are refused (they require `/vN` path rewrites across `module` + `require` + imports; planned for a future release).
+- Major-version boundary crossings need an explicit opt-in: `--allow-major <module>` (or `allow_major` in `monoco.yaml`). monoco then rewrites the `/vN` suffix across the bumper's `module` line and every consumer's `require` + imports. At most one module per release may cross.
+- On a v0 module, `--bump <module>=major` coerces to a minor bump (`v0.2.0 → v0.3.0`) — v0 is explicitly unstable in Go's semver convention, so there's no boundary to cross. Bump to `v1` by tagging `<module>/v1.0.0` by hand once, then let monoco take over.
+- **Modules that require each other can't ship in the same release.** Each side's `go.sum` would need the `h1:` hash of the other's not-yet-final content — the hashes are mutually recursive, so no tool can produce them (this is a property of Go's checksum model, not a monoco limitation). `release` refuses the plan and names the cycle; ship one side at a time with `--bump <module>=skip`, keeping its require pinned to the other's previously tagged version.
 
 ## How it works
 
@@ -185,7 +195,6 @@ Excluded modules never show up in `monoco affected`, `monoco release`, or task f
 
 ## Not in scope (yet)
 
-- v2+ major-version path rewriting.
 - Forward-propagation of orphan tags cut by hand.
 - PR creation (intentionally forge-agnostic — wrap with `gh` / `glab` / whatever).
 - `monoco doctor`.

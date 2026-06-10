@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Require cycles are now refused with a clear error instead of silently dropping modules.** Two modules that require each other cannot ship in one release — their `go.sum` hashes would be mutually recursive (a property of Go's checksum model, not monoco). Previously the planner's topo sort silently omitted cycle members from the plan; now `release` names the cycle and points at the `--bump <module>=skip` remedy. See the new "Require cycles are refused" section in [docs/release-model.md](docs/release-model.md).
+- **`go.sum` entries for cascaded modules hashed pre-rewrite content.** `release` computed every module's `h1:` hashes up front, before rewriting `go.mod`/`go.sum` — but those files are part of the module zip, so for any mid-chain module (one with both a dependency and a consumer in the plan) the hash pinned downstream described content that never got tagged. Consumers' next module-mode build or `go mod tidy` failed Go's checksum verification with a SECURITY ERROR. Modules are now hashed in plan (topo) order, each after its own rewrites are final.
+
 ### Added
 
 - **Optional `monoco.yaml` manifest** at the repo root for per-module opt-outs and task command overrides. An absent manifest preserves current defaults. ([#1](https://github.com/matt0x6f/monoco/issues/1))
