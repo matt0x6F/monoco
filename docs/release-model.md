@@ -87,6 +87,8 @@ The one shape the atomic model cannot ship: two modules that require each other 
 
 `release` detects the cycle while topo-ordering the plan and refuses, naming the members. The remedy is the same one the Go ecosystem uses: release one side at a time (`--bump <module>=skip` the others), keeping its require pinned to the previously tagged version of the other side.
 
+The refusal is not the end state: a release can be generalized to an ordered chain of commits inside one atomic push, which breaks the hash recursion by commit ordering. See [staged-releases.md](staged-releases.md) for the design.
+
 ## Atomic publish
 
 ```
