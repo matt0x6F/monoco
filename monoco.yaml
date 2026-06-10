@@ -2,4 +2,7 @@ version: 1
 
 tasks:
   test:
-    command: ["go", "test", "./...", "-count=1", "-race", "-timeout=5m"]
+    # No -race: the monoco-runners ARC image has CGO_ENABLED=0 and no C
+    # toolchain, and -race requires cgo. Restore it if the runner image
+    # grows gcc (and set CGO_ENABLED=1 in ci.yml).
+    command: ["go", "test", "./...", "-count=1", "-timeout=5m"]
