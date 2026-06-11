@@ -41,6 +41,10 @@ monoco release -y --bump modules/storage=minor
 
 # Drop a module from this release:
 monoco release -y --bump modules/storage=skip
+
+# Release a module nothing in-repo depends on — naming it in --bump
+# adds it to the release, no replace directive needed:
+monoco release -y --bump modules/cli=minor
 ```
 
 Also useful:
@@ -50,6 +54,10 @@ monoco test --since origin/main         # run tests only where it matters
 monoco lint --since origin/main
 monoco build --since origin/main
 monoco generate --since origin/main
+
+monoco test --all                       # every workspace module, not just affected
+monoco test --since origin/main -- -race -count=1   # args after -- are appended
+                                                    # to the task command
 ```
 
 The fanout commands exist because `go build ./...` at the workspace root
@@ -98,7 +106,7 @@ Gotchas worth flagging when you copy it:
 - Each release gets a train tag pointing at the same release commit: `train/2026-04-18-<slug>`.
 - Release commit message: `release: train/<date>-<slug>`.
 - **Bump kinds default to `patch`** for every module in the plan. Override per-module with `--bump <module>=<minor|major|skip>`. No commit-message inference, no prompting, no Conventional Commits dependency.
-- A **direct-affected** module is one whose source is under active local development, identified by the presence of a workspace-local `replace` directive pointing at it from any sibling module's `go.mod`.
+- A **direct-affected** module is one whose source is under active local development, identified by the presence of a workspace-local `replace` directive pointing at it from any sibling module's `go.mod`. Naming a module in `--bump` (any kind but `skip`) also adds it to the direct set — that's how you release a module no sibling depends on, like a CLI or an externally consumed library.
 - A **cascaded** module is a consumer of a direct-affected module. It gets the same default-patch treatment as directs; override with `--bump` if needed.
 - Major-version boundary crossings need an explicit opt-in: `--allow-major <module>` (or `allow_major` in `monoco.yaml`). monoco then rewrites the `/vN` suffix across the bumper's `module` line and every consumer's `require` + imports. At most one module per release may cross.
 - On a v0 module, `--bump <module>=major` coerces to a minor bump (`v0.2.0 → v0.3.0`) — v0 is explicitly unstable in Go's semver convention, so there's no boundary to cross. Bump to `v1` by tagging `<module>/v1.0.0` by hand once, then let monoco take over.
@@ -118,7 +126,7 @@ Every `release` is one atomic operation:
 7. Tag every module in the plan at its stage's commit + a train tag at the tip.
 8. `git push --atomic origin <branch> <tags...>` — all or nothing.
 
-If anything before the push fails, the working tree and refs are restored to their pre-run state. If the push fails, the local commit and tags are kept; rerun `release` after fixing the push condition.
+If anything before the push fails, the working tree and refs are restored to their pre-run state. If the push itself fails, the local commit and tags are kept: re-push them by hand after a transient failure, or unwind (`git tag -d` + `git reset --hard`) and re-plan if the remote moved ahead — see [docs/operations.md](docs/operations.md#failure-modes-and-recovery) for the exact recovery steps and an error-by-error troubleshooting table.
 
 Step 6 runs `go build` with `GOWORK=off` and `GOFLAGS=-mod=mod` so the verify pass sees the same module graph `go get` consumers will see; see [docs/release-model.md](docs/release-model.md) for the rationale.
 
@@ -179,6 +187,11 @@ exclude: []
 # (go test ./..., golangci-lint run, go build ./..., go generate ./...).
 tasks: {}
 
+# Module paths permitted to cross a major version boundary (/vN path
+# rewrite). Unioned with the --allow-major flag; at most one module per
+# release may cross.
+allow_major: []
+
 # Branches `monoco release` may push to besides the remote's default
 # branch (glob patterns, e.g. release-*). Releases always push directly
 # to a long-lived branch; PR branches are refused.
@@ -209,6 +222,7 @@ Excluded modules never show up in `monoco affected`, `monoco release`, or task f
 
 - [Architecture](docs/architecture.md) — package map and data flow.
 - [Release model](docs/release-model.md) — cascade, verification, atomic push.
+- [Operations](docs/operations.md) — setup, day-to-day usage, failure recovery, troubleshooting.
 - [POC findings](docs/poc-findings.md) — why the v1 design landed where it did.
 - Tests: `go test ./...`. End-to-end (local-fixture): `go test ./cmd/monoco/... -count=1`.
 - Integration (against the real GitHub test monorepo) runs on every push to `main` via `.github/workflows/integration.yml`. To run locally: `MONOCO_TEST_REPO_TOKEN=<PAT> go test -tags=integration ./test/integration/... -v`. See [test/integration/README.md](test/integration/README.md) for the scenario matrix and troubleshooting.

@@ -63,7 +63,7 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 			return nil, fmt.Errorf("recheck %s %s: %w", opts.Remote, plan.BaseRef, err)
 		}
 		if cur != plan.BaseSHA {
-			return nil, fmt.Errorf("base moved: %s %s was %s when plan was computed, now %s; re-run 'monoco propagate plan' and retry", opts.Remote, plan.BaseRef, plan.BaseSHA, cur)
+			return nil, fmt.Errorf("base moved: %s %s was %s when plan was computed, now %s; re-run 'monoco release' and retry", opts.Remote, plan.BaseRef, plan.BaseSHA, cur)
 		}
 	}
 

@@ -124,6 +124,12 @@ version: 1
 #   lint:
 #     command: ["golangci-lint", "run", "--timeout=5m"]
 
+# Module paths permitted to cross a major version boundary (/vN path
+# rewrite). Unioned with the --allow-major flag; at most one module per
+# release may cross.
+# allow_major:
+#   - github.com/org/repo/modules/storage
+
 # Branches monoco release may push to besides the remote's default
 # branch (glob patterns). Releases always push directly to a long-lived
 # branch; releasing from a PR branch is refused because squash/rebase

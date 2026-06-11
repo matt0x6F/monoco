@@ -25,6 +25,7 @@ We do not invent new build paradigms, override compiler behavior, or require use
 
 - `cmd/monoco/` — CLI entrypoint and subcommand wiring.
 - `internal/workspace/` — `go.work` discovery and module enumeration.
+- `internal/gitx/` — shared git CLI invocation helper (uniform error shapes, ctx cancellation).
 - `internal/gitgraph/` — reverse dependency graph derived from `go.mod` requires.
 - `internal/affected/` — direct-affected (replace-directive) and cascaded-affected computation.
 - `internal/propagate/` — `go.mod` / `go.sum` rewrites; in-process `h1:` hashing.
@@ -33,7 +34,7 @@ We do not invent new build paradigms, override compiler behavior, or require use
 - `internal/config/` — `monoco.yaml` loader (optional; sane defaults).
 - `internal/tasks/` — test / lint / build / generate fanout over the affected set.
 - `internal/fixture/` — local git-repo fixtures for end-to-end tests.
-- `docs/` — technical documentation ([architecture](docs/architecture.md), [release model](docs/release-model.md), [POC findings](docs/poc-findings.md)).
+- `docs/` — technical documentation ([architecture](docs/architecture.md), [release model](docs/release-model.md), [operations](docs/operations.md), [POC findings](docs/poc-findings.md)).
 - `test/integration/` — integration suite against a real GitHub test monorepo (tag: `integration`).
 
 ## Development commands

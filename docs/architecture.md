@@ -25,9 +25,15 @@ Parses `go.work`, enumerates workspace modules, and builds the workspace-interna
 
 Only edges whose target is itself a workspace module (has a `use` entry in `go.work`) are kept. External deps are irrelevant to monoco's job.
 
+### `internal/gitx`
+
+The single shared helper for invoking the git CLI: `gitx.Run` executes `git -C <root> <args...>` and returns trimmed stdout. Exists so `gitgraph`, `propagate`, and `release` produce identical error shapes (args + stderr in the error) and respect context cancellation uniformly.
+
+**API:** `Run`.
+
 ### `internal/gitgraph`
 
-Read-only git operations: commit range enumeration, touched-file listing, latest-tag lookup per module prefix. Shells out to `git` directly.
+Read-only git operations: commit range enumeration, touched-file listing, latest-tag lookup per module prefix. Shells out to `git` via `gitx`.
 
 **API:** `CommitsInRange`, `TouchedFiles`, `LatestTagForModule`.
 
@@ -47,7 +53,7 @@ Owns semver bump kinds: `Major`, `Minor`, `Patch`, `Skip`. Pre-1.0 versions trea
 
 Loads the optional `monoco.yaml`. Absence is equivalent to zero-config defaults — convention beats configuration.
 
-**API:** `Config` with `Exclude`, `Tasks`, `AllowMajor` fields.
+**API:** `Config` with `Exclude`, `Tasks`, `AllowMajor`, `ReleaseBranches` fields.
 
 ### `internal/propagate`
 
@@ -63,7 +69,7 @@ The heavy lifter. Two phases:
 
 ### `internal/release`
 
-The `monoco release` orchestrator. Detects direct-affected modules from workspace-local `replace` directives, applies bump kinds (default `patch`, overridable via `--bump`), and delegates the rewrite/commit/tag/push to `propagate`.
+The `monoco release` orchestrator. Detects direct-affected modules from workspace-local `replace` directives (unioned with modules named explicitly in `--bump`), applies bump kinds (default `patch`, overridable via `--bump`), enforces the long-lived-branch contract, and delegates the rewrite/commit/tag/push to `propagate`.
 
 **API:** `Options`, `Plan`, `Apply`, `CurrentVersions`.
 
@@ -105,7 +111,7 @@ bump.NextVersion       — apply bump kinds per module
   ↓
 propagate.ComputeRewrites  — new go.mod/go.sum content + tag names
   ↓
-dry-run stops here; --yes continues ↓
+dry-run stops here; -y or the Proceed? confirmation continues ↓
   ↓
 propagate.Apply:
   1. Write rewrites to disk
