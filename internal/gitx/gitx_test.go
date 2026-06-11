@@ -16,6 +16,7 @@ func initRepo(t *testing.T) string {
 		{"init", "-q"},
 		{"config", "user.email", "test@example.com"},
 		{"config", "user.name", "Test"},
+		{"config", "commit.gpgsign", "false"},
 		{"commit", "--allow-empty", "-m", "init"},
 	} {
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)

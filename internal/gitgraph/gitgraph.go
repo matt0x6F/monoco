@@ -38,11 +38,25 @@ func TouchedFiles(root, oldRef, newRef string) ([]string, error) {
 // including newRef) that touched the given path (directory or file).
 // The path is repo-relative.
 func CommitsInRange(root, oldRef, newRef, path string) ([]Commit, error) {
+	return logCommits(root, oldRef+".."+newRef, path)
+}
+
+// CommitsSince returns commits reachable from HEAD but not from
+// sinceRef, newest first. An empty sinceRef means all of HEAD's
+// history.
+func CommitsSince(root, sinceRef string) ([]Commit, error) {
+	spec := "HEAD"
+	if sinceRef != "" {
+		spec = sinceRef + "..HEAD"
+	}
+	return logCommits(root, spec, "")
+}
+
+func logCommits(root, rangeSpec, path string) ([]Commit, error) {
 	// Use printable multi-char separators: exec argv cannot contain NUL on darwin.
 	const sep = "\x1f"    // ASCII unit separator
 	const recSep = "\x1e" // ASCII record separator
 	format := "%H" + sep + "%s" + sep + "%b" + recSep
-	rangeSpec := oldRef + ".." + newRef
 	args := []string{"log", "--format=" + format, rangeSpec}
 	if path != "" {
 		args = append(args, "--", path)
@@ -68,6 +82,28 @@ func CommitsInRange(root, oldRef, newRef, path string) ([]Commit, error) {
 		})
 	}
 	return commits, nil
+}
+
+// LatestTrainTag returns the nearest train/* tag reachable from HEAD
+// (by ancestry distance, via git describe), or "" if none. Ancestry,
+// not tag date, scopes the result to the current branch's history: a
+// maintenance branch must see its own latest train, not a newer one
+// cut on main — and tags cut within the same second must still order.
+func LatestTrainTag(root string) (string, error) {
+	// describe dies when nothing matches; probe reachability first so
+	// "no train tag yet" is data, not a parsed error string.
+	out, err := gitx.Run(context.Background(), root, "tag", "--list", "train/*", "--merged", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) == "" {
+		return "", nil
+	}
+	out, err = gitx.Run(context.Background(), root, "describe", "--tags", "--match", "train/*", "--abbrev=0", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // LatestTagForModule returns the highest-semver tag for a module whose

@@ -38,6 +38,7 @@ func cmdRelease(root string, args []string) {
 	fs.Var(&cuts, "cut", "<module> (repeatable) — release this module first in its require cycle, pinned to its partners' previous tags")
 	remote := fs.String("remote", "origin", "remote to push to; set to \"\" to skip push")
 	slug := fs.String("slug", "", "train-tag slug (default: current branch)")
+	noTrailers := fs.Bool("no-trailers", false, "ignore Monoco-Bump commit-message trailers")
 	dryRun := fs.Bool("dry-run", false, "print plan and exit")
 	assumeYes := fs.Bool("y", false, "skip the Proceed? confirmation")
 	fs.Parse(args)
@@ -53,6 +54,28 @@ func cmdRelease(root string, args []string) {
 	bumpMap, err := parseBumpFlags(ws, bumps.entries)
 	if err != nil {
 		fatal(err)
+	}
+	if !*noTrailers {
+		trailerBumps, decls, since, err := release.TrailerBumps(ws)
+		if err != nil {
+			fatal(err)
+		}
+		if len(decls) > 0 {
+			window := "no train tag yet; scanned full history"
+			if since != "" {
+				window = "since " + since
+			}
+			fmt.Printf("Bump declarations from %s trailers (%s):\n", release.TrailerKey, window)
+			for _, d := range decls {
+				fmt.Printf("  %s=%s  (commit %.7s)\n", d.ModulePath, d.Kind, d.SHA)
+			}
+		}
+		// Explicit --bump flags win over trailers, per module.
+		for mp, k := range trailerBumps {
+			if _, set := bumpMap[mp]; !set {
+				bumpMap[mp] = k
+			}
+		}
 	}
 	allowMajorSet, err := resolveAllowMajor(ws, cfg.AllowMajorSet(), allowMajor.entries)
 	if err != nil {

@@ -96,4 +96,8 @@ jobs:
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
       - name: Release
+        # No --bump flags here: minor/major intent travels in
+        # `Monoco-Bump: <module>=<kind>` trailers carried by the merged
+        # commits (scanned since the last train tag). See
+        # docs/release-model.md.
         run: monoco release -y --remote origin
