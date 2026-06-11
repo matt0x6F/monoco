@@ -33,6 +33,8 @@ replace github.com/org/repo/modules/storage => ../storage
 
 That `replace` is the user's declaration of "storage is shipping in this release." During development it lets the workspace compile against uncommitted changes; at release time monoco reads it as intent.
 
+The direct set is the union of two sources: modules detected from `replace` directives, and modules named explicitly via `--bump <module>=<kind>` (any kind but `skip`). The second source exists because a module is releasable regardless of whether anything in the same repo depends on it — a CLI, or a library published only for external consumers, has no in-tree `replace` pointing at it.
+
 All directly-affected modules are then expanded transitively to **cascaded** consumers via the reverse-dep graph. Both sets get the same treatment — default `patch` bump, overridable with `--bump <module>=<kind>` (or `=skip` to drop).
 
 ## The bump plan
@@ -41,7 +43,7 @@ All directly-affected modules are then expanded transitively to **cascaded** con
 - Override per-module: `--bump modules/storage=minor`, `--bump modules/api=major`, `--bump modules/utils=skip`.
 - No commit-message inference, no Conventional Commits parsing, no prompting beyond the final `Proceed?`.
 - Pre-1.0 versions coerce `Major` → `Minor` (Go's standard semver convention).
-- At most one module per release may cross a major-version boundary (the `/vN` path rewrite is heavy; see `internal/propagate/importrewrite/`). Modules opting in must be listed in `monoco.yaml`'s `AllowMajor`.
+- At most one module per release may cross a major-version boundary (the `/vN` path rewrite is heavy; see `internal/propagate/importrewrite/`). Modules opting in must be named with `--allow-major <module>` or listed in `monoco.yaml`'s `allow_major`; the union of both applies.
 
 ## Tag naming
 
@@ -121,7 +123,7 @@ Concretely, when a push is intended (`--remote` set), `release` requires the cur
 
 If branch protection forbids all direct pushes, give the release job a bypass (a GitHub App token or PAT with `contents: write`) rather than routing the release through a PR. A strict no-bypass, squash-only policy is the one configuration monoco's model cannot serve.
 
-Before the push, if any step fails (rewrite, verify, commit, tag), the working tree and refs are restored to their pre-run state. If the push itself fails, the local release commit and tags are kept; rerun `release` after fixing the push condition (e.g., the remote moved ahead, TOCTOU lease broken).
+Before the push, if any step fails (rewrite, verify, commit, tag), the working tree and refs are restored to their pre-run state. If the push itself fails, the local release commit and tags are kept — the work is correct, only publishing failed. After a transient failure, re-push the same refs by hand; if the remote moved ahead, unwind (delete the local tags, reset to the pre-release HEAD) and re-plan — never rebase a release commit, since tags pin SHAs. Step-by-step recovery lives in [operations.md](operations.md#failure-modes-and-recovery).
 
 ## TOCTOU protection
 
