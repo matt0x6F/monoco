@@ -3,6 +3,7 @@ package release
 import (
 	"bufio"
 	"bytes"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -209,4 +210,50 @@ func TestConfirmProceed(t *testing.T) {
 			t.Errorf("ConfirmProceed(%q) = %v, want %v", in, got, want)
 		}
 	}
+}
+
+// Direct pushes to a long-lived branch are the release contract: tags
+// cut on a PR branch are orphaned by squash/rebase merges. Plan refuses
+// non-default branches when a push is intended, unless monoco.yaml's
+// release_branches allows them.
+func TestPlan_RefusesNonDefaultBranch(t *testing.T) {
+	ws := setupWithReplace(t)
+	gitRun(t, ws.Root, "push", "origin", "main")
+	remoteURL := gitOutput(t, ws.Root, "remote", "get-url", "origin")
+	gitRun(t, remoteURL, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	gitRun(t, ws.Root, "checkout", "-b", "feature/x")
+	var out bytes.Buffer
+	_, err := Plan(ws, Options{Slug: "test", Remote: "origin"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "refusing to release from branch") {
+		t.Fatalf("want direct-push refusal on feature branch, got: %v", err)
+	}
+
+	// release_branches glob patterns admit maintenance branches.
+	plan, err := Plan(ws, Options{Slug: "test", Remote: "origin", ReleaseBranches: []string{"feature/*"}}, &out)
+	if err != nil || plan == nil {
+		t.Fatalf("release_branches should allow feature/x: %v", err)
+	}
+
+	// No push intended, no guard.
+	if _, err := Plan(ws, Options{Slug: "test"}, &out); err != nil {
+		t.Fatalf("plan without remote should not be guarded: %v", err)
+	}
+
+	// The default branch is always allowed.
+	gitRun(t, ws.Root, "checkout", "main")
+	if _, err := Plan(ws, Options{Slug: "test", Remote: "origin"}, &out); err != nil {
+		t.Fatalf("plan on default branch: %v", err)
+	}
+}
+
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }

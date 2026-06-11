@@ -34,7 +34,9 @@ Release:
                            Affected modules = those with workspace-local
                            ` + "`replace`" + ` directives + transitive consumers.
                            Every module defaults to a patch bump; override
-                           with --bump <module>=<kind>.
+                           with --bump <module>=<kind>. Require cycles are
+                           released as staged commits in one atomic push;
+                           --cut <module> picks which side ships first.
 
 Run "monoco <command> -h" for command-specific flags.
 `
@@ -121,6 +123,13 @@ version: 1
 # tasks:
 #   lint:
 #     command: ["golangci-lint", "run", "--timeout=5m"]
+
+# Branches monoco release may push to besides the remote's default
+# branch (glob patterns). Releases always push directly to a long-lived
+# branch; releasing from a PR branch is refused because squash/rebase
+# merges orphan the tags.
+# release_branches:
+#   - release-*
 `
 
 func writeManifestStubIfMissing(root string) (bool, error) {

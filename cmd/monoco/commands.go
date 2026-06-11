@@ -34,6 +34,8 @@ func cmdRelease(root string, args []string) {
 	fs.Var(&bumps, "bump", "<module>=<major|minor|patch|skip> (repeatable) — override the default patch bump")
 	var allowMajor repeatableFlag
 	fs.Var(&allowMajor, "allow-major", "<module> (repeatable) — permit this module to cross a major version boundary")
+	var cuts repeatableFlag
+	fs.Var(&cuts, "cut", "<module> (repeatable) — release this module first in its require cycle, pinned to its partners' previous tags")
 	remote := fs.String("remote", "origin", "remote to push to; set to \"\" to skip push")
 	slug := fs.String("slug", "", "train-tag slug (default: current branch)")
 	dryRun := fs.Bool("dry-run", false, "print plan and exit")
@@ -56,12 +58,22 @@ func cmdRelease(root string, args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	cutSet := map[string]struct{}{}
+	for _, ref := range cuts.entries {
+		mp, ok := propagate.ResolveModuleRef(ws, ref)
+		if !ok {
+			fatal(fmt.Errorf("--cut %q: module not found in workspace", ref))
+		}
+		cutSet[mp] = struct{}{}
+	}
 
 	opts := release.Options{
-		Bumps:      bumpMap,
-		Slug:       *slug,
-		Remote:     *remote,
-		AllowMajor: allowMajorSet,
+		Bumps:           bumpMap,
+		Slug:            *slug,
+		Remote:          *remote,
+		AllowMajor:      allowMajorSet,
+		Cuts:            cutSet,
+		ReleaseBranches: cfg.ReleaseBranches,
 	}
 
 	// Dry-run is offline: don't ls-remote for a base SHA we won't use.

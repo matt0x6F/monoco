@@ -27,7 +27,8 @@ type ApplyOptions struct {
 
 // ApplyResult reports what happened.
 type ApplyResult struct {
-	ReleaseCommit string   // SHA of the release commit
+	ReleaseCommit string   // SHA of the release commit (tip of the chain when staged)
+	StageCommits  []string // one SHA per stage, in order; len 1 unless a cycle forced staging
 	Tags          []string // all tags created (module tags + train)
 	Pushed        bool
 }
@@ -96,30 +97,59 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 		return orig
 	}
 
-	// 1. Rewrite go.mod + go.sum in topo order.
-	if err := rewriteGoMods(ws, plan); err != nil {
+	// 1+2. Rewrite and commit, one commit per stage. Stage s's rewrites
+	// land in commit s, so a cycle's first side is final — and therefore
+	// hashable and taggable — before a later stage pins its new version.
+	// Single-stage plans (no cycle) produce exactly one commit with the
+	// unsuffixed message, byte-identical to the unstaged behavior. A
+	// stage with no on-disk changes (bootstrap releases of modules with
+	// no in-tree consumers) tags the current HEAD instead.
+	rewrites, err := ComputeRewrites(ws, plan)
+	if err != nil {
 		return nil, failAndRollback(fmt.Errorf("rewrite go.mods: %w", err))
 	}
-
-	// 2. Create the release commit (only if rewrites actually changed
-	// anything on disk). Bootstrap releases of modules with no in-tree
-	// consumers produce zero go.mod rewrites, so there's nothing to
-	// commit — we tag the existing HEAD instead.
-	if _, err := gitx.Run(context.Background(), ws.Root, "add", "-A"); err != nil {
-		return nil, failAndRollback(err)
+	nStages := plan.Stages
+	if nStages < 1 {
+		nStages = 1
 	}
-	hasStaged, err := hasStagedChanges(ws.Root)
-	if err != nil {
-		return nil, failAndRollback(err)
-	}
-	if hasStaged {
-		if _, err := gitx.Run(context.Background(), ws.Root, "commit", "-m", plan.CommitMsg); err != nil {
-			return nil, failAndRollback(fmt.Errorf("create release commit: %w", err))
+	stageSHA := make([]string, nStages+1)
+	for s := 1; s <= nStages; s++ {
+		var stagePaths []string
+		for _, e := range plan.Entries {
+			if entryStage(e) == s {
+				stagePaths = append(stagePaths, e.ModulePath)
+			}
 		}
+		if err := writeRewrites(rewrites, stagePaths); err != nil {
+			return nil, failAndRollback(fmt.Errorf("rewrite go.mods (stage %d): %w", s, err))
+		}
+		if _, err := gitx.Run(context.Background(), ws.Root, "add", "-A"); err != nil {
+			return nil, failAndRollback(err)
+		}
+		hasStaged, err := hasStagedChanges(ws.Root)
+		if err != nil {
+			return nil, failAndRollback(err)
+		}
+		if hasStaged {
+			msg := plan.CommitMsg
+			if nStages > 1 {
+				msg = fmt.Sprintf("%s (stage %d/%d)", plan.CommitMsg, s, nStages)
+			}
+			if _, err := gitx.Run(context.Background(), ws.Root, "commit", "-m", msg); err != nil {
+				return nil, failAndRollback(fmt.Errorf("create release commit (stage %d): %w", s, err))
+			}
+		}
+		shaOut, err := gitx.Run(context.Background(), ws.Root, "rev-parse", "HEAD")
+		if err != nil {
+			return nil, failAndRollback(err)
+		}
+		stageSHA[s] = trim(shaOut)
 	}
 
 	// 3. Verify module-mode build. Reload the workspace so the post-
 	// rewrite module paths (including any /vN majors) are visible.
+	// Cycle back-edges are verified against the previously tagged
+	// content they pin, not the workspace dirs.
 	verifyWS, err := workspace.Load(ws.Root)
 	if err != nil {
 		return nil, failAndRollback(fmt.Errorf("reload workspace for verify: %w", err))
@@ -128,23 +158,37 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 	for _, e := range plan.Entries {
 		paths = append(paths, targetPath(e))
 	}
-	if err := Verify(ctx, verifyWS, paths); err != nil {
+	wts := newWorktrees(ws.Root)
+	defer wts.cleanup()
+	pinned := map[string]map[string]string{}
+	for _, e := range plan.Entries {
+		for _, p := range e.PinnedOld {
+			rel := normalizeRelDir(ws.Modules[p.Path].RelDir)
+			root, werr := wts.dirFor(rel + "/" + p.Version)
+			if werr != nil {
+				return nil, failAndRollback(fmt.Errorf("materialize pinned %s@%s: %w", p.Path, p.Version, werr))
+			}
+			if pinned[targetPath(e)] == nil {
+				pinned[targetPath(e)] = map[string]string{}
+			}
+			pinned[targetPath(e)][p.Path] = filepath.Join(root, filepath.FromSlash(rel))
+		}
+	}
+	if err := VerifyPinned(ctx, verifyWS, paths, pinned); err != nil {
 		return nil, failAndRollback(fmt.Errorf("verify: %w", err))
 	}
 
-	releaseSHAOut, err := gitx.Run(context.Background(), ws.Root, "rev-parse", "HEAD")
-	if err != nil {
-		return nil, failAndRollback(err)
-	}
-	releaseSHA := trim(releaseSHAOut)
+	releaseSHA := stageSHA[nStages]
 
-	// 4. Create tags.
+	// 4. Create tags, each at its own stage's commit; the train tag
+	// marks the tip of the chain.
 	for _, e := range plan.Entries {
-		if tagAlreadyAt(ws.Root, e.TagName, releaseSHA) {
+		sha := stageSHA[entryStage(e)]
+		if tagAlreadyAt(ws.Root, e.TagName, sha) {
 			createdTags = append(createdTags, e.TagName)
 			continue
 		}
-		if _, err := gitx.Run(context.Background(), ws.Root, "tag", e.TagName, releaseSHA); err != nil {
+		if _, err := gitx.Run(context.Background(), ws.Root, "tag", e.TagName, sha); err != nil {
 			return nil, failAndRollback(fmt.Errorf("tag %s: %w", e.TagName, err))
 		}
 		createdTags = append(createdTags, e.TagName)
@@ -156,7 +200,7 @@ func ApplyContext(ctx context.Context, ws *workspace.Workspace, plan *Plan, opts
 	}
 	createdTags = append(createdTags, plan.TrainTag)
 
-	result := &ApplyResult{ReleaseCommit: releaseSHA, Tags: createdTags}
+	result := &ApplyResult{ReleaseCommit: releaseSHA, StageCommits: stageSHA[1:], Tags: createdTags}
 
 	// 5. Atomic push (optional). After this point, failure does NOT roll
 	// back: local tags + commit are valid; the engineer can retry push.
@@ -199,6 +243,16 @@ func targetPath(e Entry) string {
 	return e.ModulePath + "/" + semver.Major(e.NewVersion)
 }
 
+// entryStage normalizes an entry's stage: plans built before staging
+// existed (or constructed by hand in tests) leave Stage zero, which
+// means stage 1.
+func entryStage(e Entry) int {
+	if e.Stage < 1 {
+		return 1
+	}
+	return e.Stage
+}
+
 // ComputeRewrites returns the proposed go.mod rewrites + go.sum additions
 // for plan, in memory. It does not touch the filesystem. Both Apply and
 // dry-run output consume this so the preview is byte-identical.
@@ -211,9 +265,11 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 	newVersions := map[string]string{}   // keyed by pre-plan module path
 	newPaths := map[string]string{}      // old path -> /vN-suffixed path (major bumpers only)
 	targetVersion := map[string]string{} // post-plan path -> new version
+	stageFor := map[string]int{}         // pre-plan path -> release stage (0 treated as 1)
 	var rewrites []importrewrite.Rewrite
 	for _, e := range plan.Entries {
 		newVersions[e.ModulePath] = e.NewVersion
+		stageFor[e.ModulePath] = entryStage(e)
 		target := targetPath(e)
 		targetVersion[target] = e.NewVersion
 		if target != e.ModulePath {
@@ -265,6 +321,13 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 		for _, req := range mf.Require {
 			newV, inPlan := newVersions[req.Mod.Path]
 			if !inPlan {
+				continue
+			}
+			if stageFor[req.Mod.Path] > entryStage(e) {
+				// Cycle back-edge: the dependency releases in a LATER
+				// stage, so this module ships still requiring its
+				// previous tag (recorded in e.PinnedOld). The line is
+				// left untouched; its go.sum entries already exist.
 				continue
 			}
 			np := req.Mod.Path
@@ -416,14 +479,25 @@ func ComputeRewrites(ws *workspace.Workspace, plan *Plan) (map[string]RewrittenM
 	return out, nil
 }
 
-// rewriteGoMods writes the computed rewrites to disk, including go.sum
+// rewriteGoMods writes every computed rewrite to disk, including go.sum
 // additions for freshly-pinned deps.
 func rewriteGoMods(ws *workspace.Workspace, plan *Plan) error {
 	rewrites, err := ComputeRewrites(ws, plan)
 	if err != nil {
 		return err
 	}
-	for _, r := range rewrites {
+	return writeRewrites(rewrites, plan.ModulePaths())
+}
+
+// writeRewrites writes the rewrites for the named modules to disk.
+// Apply calls this once per stage so each release commit carries only
+// its own stage's changes.
+func writeRewrites(rewrites map[string]RewrittenMod, modulePaths []string) error {
+	for _, mp := range modulePaths {
+		r, ok := rewrites[mp]
+		if !ok {
+			continue
+		}
 		if !bytes.Equal(r.Old, r.New) {
 			if err := os.WriteFile(r.GoModPath, r.New, 0o644); err != nil {
 				return fmt.Errorf("write %s: %w", r.GoModPath, err)

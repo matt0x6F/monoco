@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/matt0x6f/monoco/internal/bump"
@@ -32,8 +34,17 @@ type Options struct {
 	// version boundary in this release. Typically unioned from the
 	// --allow-major CLI flag and monoco.yaml's allow_major entries.
 	AllowMajor map[string]struct{}
+	// Cuts forces which module of a require cycle releases first (its
+	// requires on the other cycle members stay at their previous tags).
+	// From the --cut CLI flag. Only valid when the plan has a cycle.
+	Cuts map[string]struct{}
 	// Branch overrides the branch to push to; defaults to current.
 	Branch string
+	// ReleaseBranches lists branch-name glob patterns that may be
+	// released from in addition to the remote's default branch (from
+	// monoco.yaml's release_branches). Direct pushes to a long-lived
+	// branch are the release contract; see docs/release-model.md.
+	ReleaseBranches []string
 }
 
 // Plan gathers affected modules, applies bump kinds (default patch,
@@ -94,6 +105,7 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 		Slug:       opts.Slug,
 		Bumps:      bumps,
 		AllowMajor: opts.AllowMajor,
+		Cuts:       opts.Cuts,
 	}
 	// Capture the remote branch SHA so Apply can detect concurrent
 	// pushes. Only meaningful when we intend to push.
@@ -105,6 +117,25 @@ func Plan(ws *workspace.Workspace, opts Options, stdout io.Writer) (*propagate.P
 				return nil, fmt.Errorf("detect branch: %w", err)
 			}
 		}
+
+		// Direct pushes to a long-lived branch are the release
+		// contract. Tags pin SHAs and never follow rewrites, so a
+		// release cut on a PR branch is orphaned the moment the PR is
+		// squash- or rebase-merged: the tagged commits stay resolvable
+		// by `go get` (tags keep them alive) but vanish from the
+		// branch's history. Refuse anything that isn't the remote's
+		// default branch or an explicitly listed release branch. An
+		// empty remote has no default yet — the branch being pushed
+		// becomes the long-lived one, so that passes.
+		def, derr := propagate.GetRemoteDefaultBranch(ws.Root, opts.Remote)
+		switch {
+		case errors.Is(derr, propagate.ErrNoDefaultBranch):
+		case derr != nil:
+			return nil, fmt.Errorf("detect %s default branch: %w", opts.Remote, derr)
+		case branch != def && !matchesReleaseBranch(opts.ReleaseBranches, branch):
+			return nil, fmt.Errorf("refusing to release from branch %q: releases push directly to a long-lived branch — tags cut on a PR branch are orphaned when the PR is squash- or rebase-merged. Release from %q, or add this branch to release_branches in monoco.yaml if it is a maintenance branch", branch, def)
+		}
+
 		ref := "refs/heads/" + branch
 		sha, err := propagate.GetRemoteRefSHA(ws.Root, opts.Remote, ref)
 		switch {
@@ -163,10 +194,27 @@ func CurrentVersions(ws *workspace.Workspace, modules []string) (map[string]stri
 // latestTag is a seam for tests.
 var latestTag = gitgraph.LatestTagForModule
 
+// matchesReleaseBranch reports whether branch matches any of the
+// release-branch glob patterns (path.Match syntax; an exact name is a
+// valid pattern). Malformed patterns match nothing.
+func matchesReleaseBranch(patterns []string, branch string) bool {
+	for _, p := range patterns {
+		if ok, err := path.Match(p, branch); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
 func printPlan(w io.Writer, p *propagate.Plan) {
 	fmt.Fprintf(w, "\nPlan:\n  Train: %s\n\n", p.TrainTag)
+	staged := p.Stages > 1
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "  MODULE\tOLD\tNEW\tKIND\tDIRECT")
+	if staged {
+		fmt.Fprintln(tw, "  STAGE\tMODULE\tOLD\tNEW\tKIND\tDIRECT\tNOTES")
+	} else {
+		fmt.Fprintln(tw, "  MODULE\tOLD\tNEW\tKIND\tDIRECT")
+	}
 	for _, e := range p.Entries {
 		old := e.OldVersion
 		if old == "" {
@@ -176,8 +224,19 @@ func printPlan(w io.Writer, p *propagate.Plan) {
 		if e.DirectChange {
 			direct = "direct"
 		}
+		if staged {
+			var notes []string
+			for _, pin := range e.PinnedOld {
+				notes = append(notes, fmt.Sprintf("pins %s@%s (previous)", pin.Path, pin.Version))
+			}
+			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\n", e.Stage, e.ModulePath, old, e.NewVersion, e.Kind, direct, strings.Join(notes, "; "))
+			continue
+		}
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", e.ModulePath, old, e.NewVersion, e.Kind, direct)
 	}
 	tw.Flush()
+	if staged {
+		fmt.Fprintf(w, "\n  %d release commits in one atomic push: a require cycle was staged.\n", p.Stages)
+	}
 	fmt.Fprintln(w)
 }

@@ -271,7 +271,11 @@ func headSHA(t *testing.T, root string) string {
 	return s
 }
 
-func TestNewPlanForModules_requireCycleError(t *testing.T) {
+// A require cycle whose pinned versions were never tagged cannot be
+// staged: there is no previously released content for the first side to
+// pin. The error must say so, and --bump skip must remain the escape
+// hatch. (Cycles WITH previous tags are staged; see stage_test.go.)
+func TestNewPlanForModules_requireCycleWithoutTags(t *testing.T) {
 	fx := fixture.New(t, fixture.Spec{
 		Modules: []fixture.ModuleSpec{
 			{Name: "auth", DependsOn: []string{"users"}},
@@ -288,21 +292,13 @@ func TestNewPlanForModules_requireCycleError(t *testing.T) {
 		Bumps: map[string]bump.Kind{"example.com/mono/auth": bump.Minor},
 	})
 	if err == nil {
-		t.Fatal("expected a require-cycle error, got nil")
+		t.Fatal("expected a staging error, got nil")
 	}
-	if !strings.Contains(err.Error(), "require cycle") {
-		t.Errorf("error should mention the require cycle, got: %v", err)
+	if !strings.Contains(err.Error(), "cannot stage require cycle") {
+		t.Errorf("error should explain staging needs previous tags, got: %v", err)
 	}
-	for _, m := range []string{"example.com/mono/auth", "example.com/mono/users"} {
-		if !strings.Contains(err.Error(), m) {
-			t.Errorf("error should name cycle member %s, got: %v", m, err)
-		}
-	}
-	if strings.Contains(err.Error(), "example.com/mono/gateway") {
-		t.Errorf("gateway is downstream of the cycle, not in it; got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "skip") {
-		t.Errorf("error should point at the --bump skip remedy, got: %v", err)
+	if !strings.Contains(err.Error(), "not a tag") {
+		t.Errorf("error should name the missing tag condition, got: %v", err)
 	}
 
 	// Skipping one side breaks the cycle and the plan goes through.

@@ -44,6 +44,13 @@ type Config struct {
 	// rejected with a clear error — this gate is intentionally
 	// opt-in per module.
 	AllowMajor []string `yaml:"allow_major"`
+
+	// ReleaseBranches lists branch-name glob patterns (path.Match
+	// syntax, e.g. `release-*`) that `monoco release` may push to in
+	// addition to the remote's default branch. Direct pushes are the
+	// release contract: tags must land on long-lived branches, never on
+	// PR branches whose commits a squash- or rebase-merge would orphan.
+	ReleaseBranches []string `yaml:"release_branches"`
 }
 
 // Task is one task-command override.

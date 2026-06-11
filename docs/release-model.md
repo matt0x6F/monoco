@@ -81,13 +81,29 @@ Ordering matters: a cascaded module's *own* `go.mod` and `go.sum` are rewritten 
 
 Validated by POC-4 — see [poc-findings.md](poc-findings.md).
 
-## Require cycles are refused
+## Require cycles are staged
 
-The one shape the atomic model cannot ship: two modules that require each other — directly or transitively — both in the same plan. A module's zip includes its own `go.sum`, so A's new zip would have to embed B's new `h1:` hash while B's embeds A's. The hashes are mutually recursive; no fixed point exists, for monoco or any other tool. This is a property of Go's checksum model, not a monoco choice: module-level cycles are legal in Go, and projects that have them always pin the *previous* version of the other side across the back-edge.
+Two modules that require each other — directly or transitively — cannot be tagged at the *same commit*. A module's zip includes its own `go.sum`, so A's new zip would have to embed B's new `h1:` hash while B's embeds A's: mutually recursive, no fixed point, for monoco or any other tool. This is a property of Go's checksum model; module-level cycles are legal in Go, and projects that have them (the grpc-go ecosystem, for one) always pin the *previous* version of the other side across the back-edge.
 
-`release` detects the cycle while topo-ordering the plan and refuses, naming the members. The remedy is the same one the Go ecosystem uses: release one side at a time (`--bump <module>=skip` the others), keeping its require pinned to the previously tagged version of the other side.
+The impossibility is per-commit, not per-push. A release with a cycle becomes an ordered **chain of commits inside one atomic push**:
 
-The refusal is not the end state: a release can be generalized to an ordered chain of commits inside one atomic push, which breaks the hash recursion by commit ordering. See [staged-releases.md](staged-releases.md) for the design.
+```
+commit 1  B finalized, its go.mod still requiring A@v1.2.3 (the previous tag)
+          tag b/v0.4.0 → commit 1
+commit 2  A rewritten to require B@v0.4.0 (hashable now — B is final at commit 1)
+          tag a/v1.3.0, train tag → commit 2
+git push --atomic origin <branch> <all refs>
+```
+
+Consumers still see the whole release or none of it, and the history is exactly what a careful release engineer produces by hand.
+
+**Stage planning.** The in-plan require graph is condensed into strongly-connected components, walked in topo order. Singleton components release in the earliest stage their dependencies allow; an acyclic plan is one stage — byte-identical to the unstaged behavior. A multi-member component is peeled one module per stage: a member may peel only if its new content **builds in module mode against the previously tagged content** of the members still unpeeled — which is what external consumers of its new tag will resolve. Cascaded members are tried before direct-affected ones (the actively developed module ships last, seeing the freshest content); `--cut <module>` forces the first peel and fails loudly if that order doesn't compile. Multi-stage commits get a ` (stage s/k)` message suffix; a stage with no on-disk rewrites tags the existing HEAD.
+
+**Pinned verification.** A cycle's back-edge ships requiring the previous tag, so verification materializes that tag's content (`git worktree`) and points the verify `replace` there instead of at the workspace dir — both during cut selection at plan time and in the apply-time verify pass. Note this means `release --dry-run` runs `go build` when (and only when) the plan contains a cycle.
+
+**Release-coupled.** If no member of a component can peel — each side's new code requires the other's new API — no staged order compiles for any tool, and the error says exactly that: the cycle is one module pretending to be two; merge the modules or break the cycle in code. The escape hatches: `--bump <module>=skip` drops one side from the plan, and a cycle whose pinned versions were never tagged cannot be staged at all (there is no previous content to pin).
+
+Major-version bumps are refused for modules inside a cycle: a `/vN` path rewrite cannot apply across a pinned back-edge.
 
 ## Atomic publish
 
@@ -96,6 +112,14 @@ git push --atomic origin <branch> <per-module tags...> <train tag>
 ```
 
 `--atomic` has been in git since 2.4 (2015) and is enforced by the git wire protocol, not by GitHub/GitLab/etc. Either every ref lands or none do — including in the pre-receive hook rejection case. No server-side infrastructure assumptions needed.
+
+## Direct push is the contract
+
+Release commits and tags land **only** via monoco's atomic push to a long-lived branch — never through a pull request. Tags pin SHAs and never follow rewrites: a release cut on a PR branch is orphaned the moment the PR is squash- or rebase-merged. The tagged commits stay resolvable by `go get` forever (tag refs keep them alive), but they vanish from the branch's history — `git tag --contains`, bisect, and release auditing all break, and the train tag marks a commit the default branch has never seen. Correctness preserved, hygiene destroyed; monoco refuses to set it up.
+
+Concretely, when a push is intended (`--remote` set), `release` requires the current branch to be the remote's **default branch**, or one matching a `release_branches` glob in `monoco.yaml` (for maintenance branches like `release-1.x`, which are long-lived and direct-pushed too). Feature PRs are unaffected — merge them with squash, rebase, or merge commits as you like; the release happens *after* merge, on the long-lived branch, like the reference CI workflow's `apply` job.
+
+If branch protection forbids all direct pushes, give the release job a bypass (a GitHub App token or PAT with `contents: write`) rather than routing the release through a PR. A strict no-bypass, squash-only policy is the one configuration monoco's model cannot serve.
 
 Before the push, if any step fails (rewrite, verify, commit, tag), the working tree and refs are restored to their pre-run state. If the push itself fails, the local release commit and tags are kept; rerun `release` after fixing the push condition (e.g., the remote moved ahead, TOCTOU lease broken).
 
