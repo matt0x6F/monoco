@@ -34,9 +34,13 @@ Release:
                            Affected modules = those with workspace-local
                            ` + "`replace`" + ` directives + transitive consumers.
                            Every module defaults to a patch bump; override
-                           with --bump <module>=<kind>. Require cycles are
-                           released as staged commits in one atomic push;
-                           --cut <module> picks which side ships first.
+                           with --bump <module>=<kind>, or declare the kind
+                           in a merged commit's message with a trailer:
+                           ` + "`Monoco-Bump: <module>=<kind>`" + ` (scanned since
+                           the last train tag; --no-trailers disables).
+                           Require cycles are released as staged commits in
+                           one atomic push; --cut <module> picks which side
+                           ships first.
 
 Run "monoco <command> -h" for command-specific flags.
 `

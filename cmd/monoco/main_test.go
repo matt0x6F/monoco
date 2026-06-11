@@ -146,6 +146,53 @@ func TestCLI_release_defaultsDirectToPatchWithoutBump(t *testing.T) {
 	}
 }
 
+// A Monoco-Bump trailer in a merged commit's message declares the bump
+// kind for the next release — the CI channel for bump intent, where
+// --bump flags aren't available. Flags still win, and --no-trailers
+// turns the scan off.
+func TestCLI_release_honorsMonocoBumpTrailer(t *testing.T) {
+	bin := buildCLI(t)
+
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{
+			{Name: "storage"},
+			{Name: "api", DependsOn: []string{"storage"}},
+		},
+	})
+	runT(t, fx.Root, "git", "tag", "modules/storage/v0.1.0")
+	runT(t, fx.Root, "git", "tag", "modules/api/v0.1.0")
+	runT(t, fx.Root, "git", "tag", "train/2026-01-01-base")
+
+	// A merged change declares its own bump kind. No replace directive:
+	// the trailer alone must add storage to the release, like --bump.
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/storage.go"),
+		"package storage\n\nfunc StorageHello() string { return \"new\" }\nfunc Batch() string { return \"b\" }\n")
+	runT(t, fx.Root, "git", "add", "-A")
+	runT(t, fx.Root, "git", "commit",
+		"-m", "feat(storage): add batch API",
+		"-m", "Monoco-Bump: modules/storage=minor")
+
+	out := runCLI(t, bin, fx.Root, "release", "--dry-run", "--slug", "trailer")
+	for _, want := range []string{"Monoco-Bump", "example.com/mono/storage=minor", "v0.2.0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run missing %q; got:\n%s", want, out)
+		}
+	}
+
+	// Explicit flag beats the trailer.
+	out = runCLI(t, bin, fx.Root, "release", "--dry-run", "--slug", "trailer",
+		"--bump", "modules/storage=patch")
+	if !strings.Contains(out, "v0.1.1") || strings.Contains(out, "v0.2.0") {
+		t.Errorf("--bump should override trailer; got:\n%s", out)
+	}
+
+	// --no-trailers ignores the declaration entirely: nothing to release.
+	out = runCLI(t, bin, fx.Root, "release", "--dry-run", "--slug", "trailer", "--no-trailers")
+	if !strings.Contains(out, "nothing to release") {
+		t.Errorf("--no-trailers should leave nothing to release; got:\n%s", out)
+	}
+}
+
 func TestCLI_init_writesStubManifest(t *testing.T) {
 	bin := buildCLI(t)
 	fx := fixture.New(t, fixture.Spec{
@@ -183,6 +230,7 @@ func TestCLI_init_singleRootModule(t *testing.T) {
 	runT(t, root, "git", "init", "-q", "-b", "main")
 	runT(t, root, "git", "config", "user.email", "t@example.com")
 	runT(t, root, "git", "config", "user.name", "t")
+	runT(t, root, "git", "config", "commit.gpgsign", "false")
 	runT(t, root, "git", "add", "-A")
 	runT(t, root, "git", "commit", "-q", "-m", "init")
 

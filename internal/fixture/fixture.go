@@ -42,6 +42,10 @@ func New(t *testing.T, spec Spec) *Fixture {
 	mustRun(t, root, "git", "checkout", "-b", "main")
 	mustRun(t, root, "git", "config", "user.email", "fixture@monoco.test")
 	mustRun(t, root, "git", "config", "user.name", "fixture")
+	// Hermetic against host git config: a global commit.gpgsign=true
+	// would make every fixture commit depend on the host's signing setup.
+	mustRun(t, root, "git", "config", "commit.gpgsign", "false")
+	mustRun(t, root, "git", "config", "tag.gpgSign", "false")
 	mustRun(t, root, "git", "remote", "add", "origin", remote)
 
 	// Modules.

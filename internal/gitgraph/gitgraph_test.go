@@ -92,6 +92,88 @@ func TestLatestTagForModule_picksHighestSemver(t *testing.T) {
 	}
 }
 
+func TestLatestTrainTag(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+
+	tag, err := LatestTrainTag(fx.Root)
+	if err != nil {
+		t.Fatalf("LatestTrainTag: %v", err)
+	}
+	if tag != "" {
+		t.Errorf("expected no train tag; got %q", tag)
+	}
+
+	run(t, fx.Root, "git", "tag", "train/2026-01-01-first")
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/extra.go"), "package storage\n")
+	run(t, fx.Root, "git", "add", "-A")
+	run(t, fx.Root, "git", "commit", "-m", "feat: more")
+	run(t, fx.Root, "git", "tag", "train/2026-02-01-second")
+
+	tag, err = LatestTrainTag(fx.Root)
+	if err != nil {
+		t.Fatalf("LatestTrainTag: %v", err)
+	}
+	if tag != "train/2026-02-01-second" {
+		t.Errorf("expected train/2026-02-01-second; got %q", tag)
+	}
+}
+
+// A train tag that is not an ancestor of HEAD (e.g. cut on main while
+// we release from a maintenance branch) must not anchor the scan.
+func TestLatestTrainTag_ignoresUnreachable(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	run(t, fx.Root, "git", "tag", "train/2026-01-01-shared")
+	run(t, fx.Root, "git", "checkout", "-q", "-b", "release-1.x")
+
+	// Back on main, a newer train lands that release-1.x can't see.
+	run(t, fx.Root, "git", "checkout", "-q", "main")
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/main_only.go"), "package storage\n")
+	run(t, fx.Root, "git", "add", "-A")
+	run(t, fx.Root, "git", "commit", "-m", "feat: main only")
+	run(t, fx.Root, "git", "tag", "train/2026-03-01-main-only")
+
+	run(t, fx.Root, "git", "checkout", "-q", "release-1.x")
+	tag, err := LatestTrainTag(fx.Root)
+	if err != nil {
+		t.Fatalf("LatestTrainTag: %v", err)
+	}
+	if tag != "train/2026-01-01-shared" {
+		t.Errorf("expected train/2026-01-01-shared; got %q", tag)
+	}
+}
+
+func TestCommitsSince(t *testing.T) {
+	fx := fixture.New(t, fixture.Spec{
+		Modules: []fixture.ModuleSpec{{Name: "storage"}},
+	})
+	run(t, fx.Root, "git", "tag", "train/2026-01-01-base")
+
+	writeFile(t, filepath.Join(fx.Root, "modules/storage/extra.go"), "package storage\n")
+	run(t, fx.Root, "git", "add", "-A")
+	run(t, fx.Root, "git", "commit", "-m", "feat: after train")
+
+	commits, err := CommitsSince(fx.Root, "train/2026-01-01-base")
+	if err != nil {
+		t.Fatalf("CommitsSince: %v", err)
+	}
+	if len(commits) != 1 || commits[0].Subject != "feat: after train" {
+		t.Errorf("expected only the post-train commit; got %v", commits)
+	}
+
+	// Empty ref scans full history (fixture has at least 2 commits now).
+	all, err := CommitsSince(fx.Root, "")
+	if err != nil {
+		t.Fatalf("CommitsSince(\"\"): %v", err)
+	}
+	if len(all) < 2 {
+		t.Errorf("expected full history; got %v", all)
+	}
+}
+
 func headSHA(t *testing.T, root string) string {
 	t.Helper()
 	cmd := exec.Command("git", "-C", root, "rev-parse", "HEAD")

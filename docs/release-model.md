@@ -40,10 +40,30 @@ All directly-affected modules are then expanded transitively to **cascaded** con
 ## The bump plan
 
 - Every affected module defaults to `patch`.
-- Override per-module: `--bump modules/storage=minor`, `--bump modules/api=major`, `--bump modules/utils=skip`.
-- No commit-message inference, no Conventional Commits parsing, no prompting beyond the final `Proceed?`.
+- Override per-module: `--bump modules/storage=minor`, `--bump modules/api=major`, `--bump modules/utils=skip` — or, for releases cut where flags aren't available (CI), a `Monoco-Bump:` trailer in a merged commit's message (next section).
+- No commit-message *inference* — no Conventional Commits parsing, no classifying prose, no prompting beyond the final `Proceed?`. The `Monoco-Bump` trailer is not inference: it is the same explicit `<module>=<kind>` declaration as `--bump`, carried in git instead of on the command line.
 - Pre-1.0 versions coerce `Major` → `Minor` (Go's standard semver convention).
 - At most one module per release may cross a major-version boundary (the `/vN` path rewrite is heavy; see `internal/propagate/importrewrite/`). Modules opting in must be named with `--allow-major <module>` or listed in `monoco.yaml`'s `allow_major`; the union of both applies.
+
+## The `Monoco-Bump` trailer: bump intent for CI releases
+
+Bump intent is declared at release time, but flags die at the merge boundary: the developer who knows a PR deserves a minor isn't the one running `monoco release -y` on the push to `main` — CI is, with no flags. Without another channel, an automated release can only ever cut patches. The channel is a git trailer:
+
+```
+Monoco-Bump: <module>=<major|minor|patch|skip>
+```
+
+written as its own line in a commit message (canonically in the trailer block, like `Signed-off-by:`). `<module>` accepts the same refs as `--bump` — the module path or its repo-relative directory. One declaration per line; repeat the key for more modules.
+
+**Scan window.** `release` scans commit messages between the nearest reachable train tag and `HEAD` (all history when no train tag exists yet). Each declaration is therefore consumed by exactly one release: the train tag it ships under moves the anchor past it. Reachability — not tag date — anchors the window, so a maintenance branch sees its own last train, never a newer one cut on `main`.
+
+**Precedence and conflicts.** Explicit `--bump` flags beat trailers, per module; trailers beat the default patch. When commits in the window disagree about a module, the largest kind wins (`skip < patch < minor < major`) — a `skip` never suppresses another commit's explicit release request. A non-`skip` declaration adds its module to the direct set exactly like `--bump` does, so a PR can release a module nothing in-tree depends on.
+
+**Fail closed.** A trailer naming an unknown module, or a malformed value, is a hard error — a typo that silently under-releases is the one failure mode this channel must not have. Recovery: cut the release manually with `--no-trailers` plus explicit `--bump` flags; its train tag moves the window past the bad trailer. `--no-trailers` also serves the operator who wants a fully flag-driven release.
+
+**Majors stay double-gated.** A trailer can *request* `major`, but the module must still be authorized via `--allow-major` or `monoco.yaml`'s `allow_major`. Intent travels in the commit; authorization lives with the repo.
+
+**Surviving the merge.** With merge commits or rebase merges, branch commit messages land on `main` intact — write the trailer in any commit of the PR. With squash merges, GitHub folds branch commit *subjects* into a bulleted list, so either put the trailer in the PR description (and default the squash message to it), make it a commit subject on the branch (the parser tolerates the `* ` bullet prefix), or paste it into the merge box. The reference CI workflow's `plan` job previews the resulting plan on the PR whenever the trailer is present in branch commits.
 
 ## Tag naming
 

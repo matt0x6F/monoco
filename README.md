@@ -45,6 +45,12 @@ monoco release -y --bump modules/storage=skip
 # Release a module nothing in-repo depends on — naming it in --bump
 # adds it to the release, no replace directive needed:
 monoco release -y --bump modules/cli=minor
+
+# Declaring a bump from a PR (for releases cut by CI, where flags
+# aren't available): add a git trailer to a commit that merges to the
+# release branch — the next release honors it like a --bump flag:
+#
+#   Monoco-Bump: modules/storage=minor
 ```
 
 Also useful:
@@ -98,6 +104,12 @@ Gotchas worth flagging when you copy it:
 - Major-version bumps across the `/vN` boundary require an explicit
   `--allow-major <module>` (or `allow_major` in `monoco.yaml`); without
   it, `monoco release --dry-run` will just fail the `plan` job.
+- The `apply` job runs `monoco release -y` with no `--bump` flags, so
+  minor/major releases through CI are declared with `Monoco-Bump:`
+  trailers in the merged commits. If you squash-merge, put the trailer
+  in the PR description (or merge-box message) — GitHub's default
+  squash message keeps only branch commit *subjects*, so a trailer in a
+  branch commit's body would be dropped.
 
 ## Conventions
 
@@ -105,7 +117,7 @@ Gotchas worth flagging when you copy it:
 - Per-module tags follow Go's nested-module convention: `modules/storage/v0.9.0`.
 - Each release gets a train tag pointing at the same release commit: `train/2026-04-18-<slug>`.
 - Release commit message: `release: train/<date>-<slug>`.
-- **Bump kinds default to `patch`** for every module in the plan. Override per-module with `--bump <module>=<minor|major|skip>`. No commit-message inference, no prompting, no Conventional Commits dependency.
+- **Bump kinds default to `patch`** for every module in the plan. Override per-module with `--bump <module>=<minor|major|skip>`, or — for releases cut by CI — with a `Monoco-Bump: <module>=<kind>` trailer in any commit message since the last train tag. No commit-message *inference*, no prompting, no Conventional Commits dependency: the trailer is the same explicit declaration as the flag, carried in git. Flags beat trailers; across commits the largest kind wins; typos fail the plan rather than silently under-releasing (`--no-trailers` is the escape hatch). See [docs/release-model.md](docs/release-model.md#the-monoco-bump-trailer-bump-intent-for-ci-releases).
 - A **direct-affected** module is one whose source is under active local development, identified by the presence of a workspace-local `replace` directive pointing at it from any sibling module's `go.mod`. Naming a module in `--bump` (any kind but `skip`) also adds it to the direct set — that's how you release a module no sibling depends on, like a CLI or an externally consumed library.
 - A **cascaded** module is a consumer of a direct-affected module. It gets the same default-patch treatment as directs; override with `--bump` if needed.
 - Major-version boundary crossings need an explicit opt-in: `--allow-major <module>` (or `allow_major` in `monoco.yaml`). monoco then rewrites the `/vN` suffix across the bumper's `module` line and every consumer's `require` + imports. At most one module per release may cross.
